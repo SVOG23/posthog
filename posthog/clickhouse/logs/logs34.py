@@ -218,7 +218,8 @@ CREATE TABLE IF NOT EXISTS {settings.CLICKHOUSE_LOGS_CLUSTER_DATABASE}.{KAFKA_TA
     `resource_attributes` Map(LowCardinality(String), String),
     `instrumentation_scope` String,
     `event_name` String,
-    `attributes` Map(LowCardinality(String), String)
+    `attributes` Map(LowCardinality(String), String),
+    `retention_days` Nullable(Int32)
 )
 ENGINE = {kafka_engine(topic=KAFKA_TOPIC, group=KAFKA_GROUP, serialization="Avro", named_collection=KAFKA_NAMED_COLLECTION)}
 SETTINGS
@@ -226,7 +227,8 @@ SETTINGS
     kafka_num_consumers = 8,
     kafka_poll_timeout_ms = 3000,
     kafka_poll_max_batch_size = 1000,
-    kafka_thread_per_consumer = 1
+    kafka_thread_per_consumer = 1,
+    input_format_avro_allow_missing_fields = 1
 """
 
 
@@ -259,11 +261,15 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.kafka_logs34_avro_mv TO {db}.{TABLE_
     `_bytes_compressed` Nullable(Int64)
 )
 AS SELECT
-    {KAFKA_TABLE_NAME}.* EXCEPT (created_at, attribute_values, attribute_keys, attributes, attributes_map_str, attributes_map_float, attributes_map_datetime, resource_attributes),
+    {KAFKA_TABLE_NAME}.* EXCEPT (created_at, attribute_values, attribute_keys, attributes, attributes_map_str, attributes_map_float, attributes_map_datetime, resource_attributes, retention_days),
     mapSort(mapApply((k, v) -> (concat(k, '__str'), JSONExtractString(v)), attributes)) AS attributes_map_str,
     mapSort(mapApply((k, v) -> (k, JSONExtractString(v)), resource_attributes)) AS resource_attributes,
     toInt32OrZero(_headers.value[indexOf(_headers.name, 'team_id')]) AS team_id,
-    observed_timestamp + toIntervalDay(toInt32OrDefault(_headers.value[indexOf(_headers.name, 'retention-days')], toInt32(15))) AS original_expiry_timestamp,
+    observed_timestamp + toIntervalDay(
+        if(retention_days IS NOT NULL AND retention_days > 0,
+           retention_days,
+           toInt32OrDefault(_headers.value[indexOf(_headers.name, 'retention-days')], toInt32(15)))
+    ) AS original_expiry_timestamp,
     _partition,
     _topic,
     _offset,
