@@ -18,8 +18,11 @@ import { TeamManager } from '~/utils/team-manager'
 
 import { LogsIngestionConsumerConfig } from './config'
 import { type PiiScrubStats } from './log-pii-scrub'
-import { processLogMessageBuffer } from './log-record-avro'
+import { type LogRecord, processLogMessageBuffer, stampRetentionOnLogMessageBuffer } from './log-record-avro'
 import { LOGS_DLQ_OUTPUT, LOGS_OUTPUT, LogsDlqOutput, LogsOutput } from './outputs/outputs'
+import type { CompiledRetentionRuleSet } from './retention/evaluate-retention'
+import { safeEvaluateRetentionDays } from './retention/evaluate-retention'
+import { RetentionRulesCache } from './retention/retention-rules-cache'
 import type { CompiledRuleSet } from './sampling/evaluate'
 import { LogsSamplingService } from './sampling/logs-sampling.service'
 import { SamplingRulesCache } from './sampling/sampling-rules-cache'
@@ -31,6 +34,8 @@ export interface LogsIngestionConsumerDeps {
     quotaLimiting: QuotaLimiting
     /** When set, enabled teams may run head sampling before ClickHouse Kafka produce. */
     samplingRulesCache?: SamplingRulesCache
+    /** When set, enabled teams stamp per-row retention from retention rules before produce. */
+    retentionRulesCache?: RetentionRulesCache
     /**
      * Resolved outputs registry — must include `LOGS_OUTPUT`, `LOGS_DLQ_OUTPUT`,
      * and `APP_METRICS_OUTPUT`. The producer + topic for each is wired by the
@@ -193,6 +198,22 @@ export const logsDropFractionHistogram = new Histogram({
  * header (droppedFraction ≤ 1), so a message is never billed above today's gross. Returns 0 when
  * we can't measure (no header or no content bytes), i.e. no credit rather than a wrong one.
  */
+/** Match a team against a `*` / comma-separated-ids / empty enable list (empty = disabled). */
+export function teamMatchesEnabledList(raw: string, teamId: number): boolean {
+    const trimmed = (raw || '').trim()
+    if (!trimmed) {
+        return false
+    }
+    if (trimmed === '*') {
+        return true
+    }
+    return trimmed
+        .split(',')
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !Number.isNaN(n))
+        .includes(teamId)
+}
+
 export function billingByteReductionForDrops(headerBytes: number, bytesDropped: number, bytesTotal: number): number {
     if (headerBytes <= 0 || bytesDropped <= 0 || bytesTotal <= 0) {
         return 0
@@ -213,6 +234,8 @@ export class LogsIngestionConsumer {
     private samplingService: LogsSamplingService
     private readonly samplingEnabledTeamsRaw: string
     private readonly samplingKillswitch: boolean
+    private readonly retentionEnabledTeamsRaw: string
+    private readonly retentionKillswitch: boolean
     private readonly billingProrateEnabled: boolean
 
     protected groupId: string
@@ -256,6 +279,8 @@ export class LogsIngestionConsumer {
         this.samplingService = new LogsSamplingService(this.redis, mergedConfig.LOGS_LIMITER_TTL_SECONDS)
         this.samplingEnabledTeamsRaw = mergedConfig.LOGS_SAMPLING_ENABLED_TEAMS
         this.samplingKillswitch = mergedConfig.LOGS_SAMPLING_KILLSWITCH
+        this.retentionEnabledTeamsRaw = mergedConfig.LOGS_RETENTION_ENABLED_TEAMS
+        this.retentionKillswitch = mergedConfig.LOGS_RETENTION_KILLSWITCH
         this.billingProrateEnabled = mergedConfig.LOGS_BILLING_PRORATE_ENABLED
     }
 
@@ -263,18 +288,14 @@ export class LogsIngestionConsumer {
         if (this.samplingKillswitch) {
             return false
         }
-        const raw = (this.samplingEnabledTeamsRaw || '').trim()
-        if (!raw) {
+        return teamMatchesEnabledList(this.samplingEnabledTeamsRaw, teamId)
+    }
+
+    private isRetentionEvalEnabledForTeam(teamId: number): boolean {
+        if (this.retentionKillswitch) {
             return false
         }
-        if (raw === '*') {
-            return true
-        }
-        return raw
-            .split(',')
-            .map((s) => parseInt(s.trim(), 10))
-            .filter((n) => !Number.isNaN(n))
-            .includes(teamId)
+        return teamMatchesEnabledList(this.retentionEnabledTeamsRaw, teamId)
     }
 
     /**
@@ -313,6 +334,26 @@ export class LogsIngestionConsumer {
         }
         const useSamplingPipeline = Boolean(ruleSet && ruleSet.rules.length > 0)
 
+        // Per-row retention: resolve the team's retention rules when enabled. When any rule exists we
+        // stamp `retention_days` per record (falling back to the team default); ClickHouse then reads
+        // the per-row value. With no rules we leave it unset and the batch `retention-days` header —
+        // still emitted below — carries the team default, preserving the fast passthrough path.
+        const retentionCache = this.deps.retentionRulesCache
+        const retentionEvalEnabled = this.isRetentionEvalEnabledForTeam(message.teamId)
+        let retentionRuleSet: CompiledRetentionRuleSet | null = null
+        if (retentionCache && retentionEvalEnabled) {
+            retentionRuleSet = await retentionCache.getCompiledRuleSet(message.teamId)
+        }
+        const useRetention = Boolean(retentionRuleSet && retentionRuleSet.rules.length > 0)
+        const defaultRetentionDays = logsSettings.retention_days ?? DEFAULT_LOGS_RETENTION_DAYS
+        const retention = useRetention
+            ? {
+                  resolveRetentionDays: (record: LogRecord): number | null =>
+                      safeEvaluateRetentionDays(retentionRuleSet, record, message.teamId),
+                  defaultRetentionDays,
+              }
+            : undefined
+
         trace.getActiveSpan()?.setAttributes({
             'logs.sampling.killswitch': this.samplingKillswitch,
             'logs.sampling.enabled_teams_configured': Boolean((this.samplingEnabledTeamsRaw || '').trim()),
@@ -320,9 +361,15 @@ export class LogsIngestionConsumer {
             'logs.sampling.cache_present': Boolean(samplingCache),
             'logs.sampling.eval_enabled_for_team': samplingEvalEnabled,
             'logs.sampling.compiled_rule_count': ruleSet?.rules.length ?? 0,
+            'logs.retention.cache_present': Boolean(retentionCache),
+            'logs.retention.eval_enabled_for_team': retentionEvalEnabled,
+            'logs.retention.compiled_rule_count': retentionRuleSet?.rules.length ?? 0,
+            'logs.retention.use_retention': useRetention,
             'logs.sampling.pipeline': useSamplingPipeline
                 ? 'decode_sample_encode'
-                : 'passthrough_processLogMessageBuffer',
+                : useRetention
+                  ? 'decode_stamp_retention_encode'
+                  : 'passthrough_processLogMessageBuffer',
         })
 
         if (useSamplingPipeline && ruleSet) {
@@ -330,7 +377,8 @@ export class LogsIngestionConsumer {
                 message.message.value!,
                 logsSettings,
                 ruleSet,
-                message.teamId
+                message.teamId,
+                retention
             )
             if (sampled.recordsDropped > 0) {
                 logsSamplingRecordsDroppedCounter.inc({ team_id: message.teamId.toString() }, sampled.recordsDropped)
@@ -358,6 +406,27 @@ export class LogsIngestionConsumer {
                 bytesDroppedByRuleId: sampled.bytesDroppedByRuleId,
                 contentBytesDropped: sampled.contentBytesDropped,
                 contentBytesTotal: sampled.contentBytesTotal,
+            }
+        }
+
+        // Retention-only path (no head sampling, but retention rules exist): decode to stamp per-row
+        // retention, then encode. Nothing is dropped, so there's nothing to credit.
+        if (retention) {
+            const res = await stampRetentionOnLogMessageBuffer(
+                message.message.value!,
+                logsSettings,
+                retention.resolveRetentionDays,
+                retention.defaultRetentionDays
+            )
+            return {
+                outcome: 'produce',
+                processedValue: res.value,
+                pii: res.pii,
+                recordsDropped: 0,
+                recordsDroppedByRuleId: new Map(),
+                bytesDroppedByRuleId: new Map(),
+                contentBytesDropped: 0,
+                contentBytesTotal: 0,
             }
         }
 

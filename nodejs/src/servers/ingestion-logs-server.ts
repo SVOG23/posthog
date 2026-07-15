@@ -15,6 +15,7 @@ import {
     getDefaultKafkaWarpstreamLogsProducerEnvConfig,
 } from '~/logs/outputs/producers'
 import { createLogsOutputsRegistry } from '~/logs/outputs/registry'
+import { RetentionRulesCache } from '~/logs/retention/retention-rules-cache'
 import { SamplingRulesCache } from '~/logs/sampling/sampling-rules-cache'
 
 import { CommonConfig } from '../common/config'
@@ -101,6 +102,7 @@ export class IngestionLogsServer implements NodeServer {
         const teamManager = new TeamManager(this.postgres)
         const quotaLimiting = new QuotaLimiting(this.posthogRedisPool, teamManager)
         const samplingRulesCache = new SamplingRulesCache(this.postgres)
+        const retentionRulesCache = new RetentionRulesCache(this.postgres)
 
         // 2. Resolve outputs (topic + producer per logical name, env-controlled)
         const outputs = createLogsOutputsRegistry().build(this.producerRegistry, this.config)
@@ -114,6 +116,7 @@ export class IngestionLogsServer implements NodeServer {
                 quotaLimiting,
                 outputs,
                 samplingRulesCache,
+                retentionRulesCache,
             })
             await consumer.start()
             return consumer.service

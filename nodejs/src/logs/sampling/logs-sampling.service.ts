@@ -110,7 +110,11 @@ export class LogsSamplingService {
         buffer: Buffer,
         settings: LogsSettings,
         ruleSet: CompiledRuleSet,
-        teamId?: number
+        teamId?: number,
+        // When set, each surviving record is stamped with a per-row retention resolved from the
+        // team's retention rules (falling back to `defaultRetentionDays`). Folded into this decode
+        // cycle so a team with both sampling and retention rules only decodes/encodes once.
+        retention?: { resolveRetentionDays: (record: LogRecord) => number | null; defaultRetentionDays: number }
     ): Promise<ProcessBufferWithSamplingResult> {
         const [logRecordType, compressionCodec, records] = await decodeLogRecords(buffer)
         if (!logRecordType) {
@@ -207,6 +211,11 @@ export class LogsSamplingService {
                 contentBytesDropped,
                 contentBytesTotal,
                 allDropped: true,
+            }
+        }
+        if (retention) {
+            for (const record of kept) {
+                record.retention_days = retention.resolveRetentionDays(record) ?? retention.defaultRetentionDays
             }
         }
         const value = await encodeLogRecords(logRecordType, compressionCodec, kept)

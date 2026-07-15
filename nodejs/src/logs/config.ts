@@ -50,6 +50,10 @@ export type LogsIngestionConsumerConfig = {
     LOGS_SAMPLING_ENABLED_TEAMS: string
     /** When `true`, sampling always keeps every record (metrics path may still run). */
     LOGS_SAMPLING_KILLSWITCH: boolean
+    /** Comma-separated team IDs, or `*` for all teams, or empty to disable per-row retention rule evaluation entirely. */
+    LOGS_RETENTION_ENABLED_TEAMS: string
+    /** When `true`, retention rules are never evaluated (rows keep the team default via the batch header). */
+    LOGS_RETENTION_KILLSWITCH: boolean
     /**
      * When `true`, rows removed by drop rules are credited back to the billed usage metrics
      * (`bytes_ingested` / `records_ingested`). When `false` (default), the credit is only
@@ -83,6 +87,9 @@ export function getDefaultLogsIngestionConsumerConfig(): LogsIngestionConsumerCo
         LOGS_LIMITER_TEAM_REFILL_RATE_KB_PER_SECOND: '',
         LOGS_SAMPLING_ENABLED_TEAMS: '*',
         LOGS_SAMPLING_KILLSWITCH: false,
+        // Off in prod until per-team rollout; on in dev for local end-to-end testing.
+        LOGS_RETENTION_ENABLED_TEAMS: isProdEnv() ? '' : '*',
+        LOGS_RETENTION_KILLSWITCH: false,
         LOGS_BILLING_PRORATE_ENABLED: false,
         // Overlapping fields with CommonConfig, included for standalone usage
         // ok to connect to localhost over plaintext
