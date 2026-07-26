@@ -6,4 +6,8 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common imp
 
 @config.config
 class YouTubeAnalyticsSourceConfig(config.Config):
-    pass
+    client_id: str
+    client_secret: str
+    refresh_token: str
+    channel_id: str | None = None
+    start_date: str | None = None
