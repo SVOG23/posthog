@@ -208,6 +208,7 @@ the row lists both.
 | e_conomic                        | HTTP                        | requests                                                        | ✅                          |
 | easypost                         | HTTP                        | requests                                                        | ✅                          |
 | easypromos                       | HTTP                        | requests                                                        | ✅                          |
+| ebay                             | HTTP                        | requests                                                        | ✅                          |
 | elevenlabs                       | HTTP                        | requests                                                        | ✅                          |
 | eppo                             | HTTP                        | requests + `rest_source.RESTClient`                             | ✅                          |
 | freshcaller                      | HTTP                        | requests                                                        | ✅                          |
@@ -889,7 +890,6 @@ doesn't conflict with concurrent PRs.
 - dynamics_365_business_central
 - dynamodb
 - e2b
-- ebay
 - ecb_data_portal
 - eloqua
 - emarsys
