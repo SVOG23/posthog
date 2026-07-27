@@ -144,6 +144,23 @@ class TestTTLCache:
         assert fetch_org.call_count == 3
         assert fetch_all.call_count == 2
 
+    def test_invalidation_during_fetch_prevents_stale_repopulation(self) -> None:
+        responses = iter([[_row(team_id=1)], [_row(team_id=2, schema_name="two")]])
+
+        def fetch_rows(_organization_id: str) -> list[dict]:
+            rows = next(responses)
+            if rows[0]["team_id"] == 1:
+                cp_teams.invalidate_org_cache("org-1")
+            return rows
+
+        with patch("posthog.ducklake.cp_teams._fetch_org_rows", side_effect=fetch_rows) as fetch_org:
+            stale = cp_teams.list_org_teams("org-1")
+            fresh = cp_teams.list_org_teams("org-1")
+
+        assert fetch_org.call_count == 2
+        assert stale is not None and [team.team_id for team in stale] == [1]
+        assert fresh is not None and [team.team_id for team in fresh] == [2]
+
     def test_cache_is_keyed_per_org(self) -> None:
         with patch("posthog.ducklake.cp_teams._fetch_org_rows", return_value=[_row()]) as mock_fetch:
             cp_teams.list_org_teams("org-1")

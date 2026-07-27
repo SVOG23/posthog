@@ -309,17 +309,7 @@ def reconcile_managed_warehouse_tables(*, team_id: int, organization_id: str | U
     if not source_schemas:
         return
 
-    try:
-        current_table_suffix = _membership_table_suffix(
-            team_id=team_id, organization_id=organization_id, use_cache=False
-        )
-    except (RuntimeError, ValueError):
-        return
-    if current_table_suffix != table_suffix:
-        return
-
     with transaction.atomic():
-        # The fresh CP read above ensures membership removal also wins this race.
         server = DuckgresServer.objects.select_for_update().filter(organization_id=organization_id).first()
         team = Team.objects.select_for_update().only("id").filter(id=team_id, organization_id=organization_id).first()
         if server is None or team is None:
@@ -336,6 +326,15 @@ def reconcile_managed_warehouse_tables(*, team_id: int, organization_id: str | U
             .first()
         )
         if source is None:
+            return
+
+        try:
+            current_table_suffix = _membership_table_suffix(
+                team_id=team_id, organization_id=organization_id, use_cache=False
+            )
+        except (RuntimeError, ValueError):
+            return
+        if current_table_suffix != table_suffix:
             return
 
         for schema in source_schemas:
