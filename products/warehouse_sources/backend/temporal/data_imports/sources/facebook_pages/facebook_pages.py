@@ -211,7 +211,12 @@ def resolve_page_access_token(
         if exchanged.get("access_token"):
             token = str(exchanged["access_token"])
     except Exception as e:
-        logger.debug(f"Facebook Pages: could not exchange for a long-lived token, using the supplied one: {e}")
+        # Log only the exception class: the exchange URL carries client_secret and the token as
+        # query params, and requests' exception text can echo the full URL back.
+        logger.debug(
+            "Facebook Pages: could not exchange for a long-lived token, using the supplied one",
+            error_type=type(e).__name__,
+        )
 
     try:
         page = _fetch_json(
@@ -220,7 +225,11 @@ def resolve_page_access_token(
         if page.get("access_token"):
             token = str(page["access_token"])
     except Exception as e:
-        logger.debug(f"Facebook Pages: could not read a Page access token, using the user token: {e}")
+        # See above: keep the credential-bearing URL out of the logged exception text.
+        logger.debug(
+            "Facebook Pages: could not read a Page access token, using the user token",
+            error_type=type(e).__name__,
+        )
 
     return token
 
