@@ -4,6 +4,7 @@ import re
 import ssl
 import math
 import time
+import threading
 import collections
 from collections.abc import Callable, Iterator
 from contextlib import _GeneratorContextManager
@@ -14,8 +15,10 @@ import structlog
 from clickhouse_connect import get_client
 from clickhouse_connect.driver.client import Client as ClickHouseClient
 from clickhouse_connect.driver.exceptions import ClickHouseError, ProgrammingError
+from clickhouse_connect.driver.httputil import get_pool_manager
 from dlt.common.normalizers.naming.snake_case import NamingConvention
 from structlog.types import FilteringBoundLogger
+from urllib3 import PoolManager
 
 from posthog.exceptions_capture import capture_exception
 
@@ -174,6 +177,37 @@ def _apply_session_settings(client: ClickHouseClient, settings: dict[str, Any]) 
             )
 
 
+# Keyed by whether TLS certificates are verified, so a plain-HTTP tunnel and an
+# HTTPS-with-`verify=False` tunnel don't share one manager. Cached because
+# clickhouse-connect only closes a pool manager it built itself and registers every manager
+# it is handed in a process-global dict, so building one per client would retain them for
+# the lifetime of the worker.
+_PROXYLESS_POOL_MANAGERS: dict[bool, PoolManager] = {}
+_PROXYLESS_POOL_MANAGERS_LOCK = threading.Lock()
+
+
+def _proxyless_pool_manager(*, verify: bool) -> PoolManager:
+    """Return a shared urllib3 manager that ignores the HTTP_PROXY/HTTPS_PROXY env vars.
+
+    PostHog's runtime routes outbound HTTP through the Smokescreen egress proxy via those
+    env vars, and clickhouse-connect applies them to every host including loopback, which
+    Smokescreen blocks by design. A request sent through an SSH tunnel therefore goes to the
+    proxy and never reaches the local forwarded port, so the tunnel never opens a channel to
+    the customer's ClickHouse. Handing clickhouse-connect a manager makes it skip its own
+    proxy wiring entirely. This is a per-code-path opt-out rather than a NO_PROXY entry so
+    that direct connections keep going through Smokescreen for egress control (see the
+    charts repo's docs/claude/egress-proxy.md).
+    """
+    with _PROXYLESS_POOL_MANAGERS_LOCK:
+        manager = _PROXYLESS_POOL_MANAGERS.get(verify)
+        if manager is None:
+            # clickhouse-connect's own factory, so the TCP keepalive tuning and certificate
+            # handling match what the library would have configured for a direct connection.
+            manager = get_pool_manager(verify=verify)
+            _PROXYLESS_POOL_MANAGERS[verify] = manager
+        return manager
+
+
 def _get_client(
     *,
     host: str,
@@ -183,6 +217,7 @@ def _get_client(
     password: str | None,
     secure: bool,
     verify: bool,
+    via_tunnel: bool,
     query_timeout: int = DATA_QUERY_TIMEOUT_SECONDS,
     settings: Optional[dict[str, Any]] = None,
 ) -> ClickHouseClient:
@@ -192,6 +227,13 @@ def _get_client(
     firewall-friendly, easy to tunnel via SSH, and exposes a streaming Arrow
     reader that we use to read very large tables without buffering them in
     memory.
+
+    `via_tunnel` states that `host`/`port` are an SSH tunnel's local bind address rather than
+    a user-supplied host. That provenance is what makes bypassing the egress proxy safe, so
+    callers must pass it through from the tunnel helper that produced the address instead of
+    inferring it from the host looking like loopback: a user-supplied loopback host must stay
+    proxied, because there the proxy is the control stopping us from reaching our own
+    services. See `_proxyless_pool_manager`.
     """
     attempt = 0
     while True:
@@ -209,6 +251,9 @@ def _get_client(
                 send_receive_timeout=query_timeout,
                 query_limit=0,  # we manage limits ourselves
                 compress=True,
+                # None leaves clickhouse-connect to build its own manager, which is where it
+                # applies the egress proxy env vars.
+                pool_mgr=_proxyless_pool_manager(verify=verify) if via_tunnel else None,
             )
         except (ClickHouseError, OSError, ssl.SSLError) as e:
             # OSError covers socket.gaierror, ConnectionRefusedError, TimeoutError,
@@ -307,6 +352,7 @@ def get_schemas(
     password: str | None,
     secure: bool,
     verify: bool,
+    via_tunnel: bool,
     names: list[str] | None = None,
 ) -> dict[str, list[tuple[str, str, bool]]]:
     """Discover columns for all tables in the given database.
@@ -324,6 +370,7 @@ def get_schemas(
         password=password,
         secure=secure,
         verify=verify,
+        via_tunnel=via_tunnel,
         query_timeout=METADATA_QUERY_TIMEOUT_SECONDS,
     )
 
@@ -414,6 +461,7 @@ def get_clickhouse_row_count(
     password: str | None,
     secure: bool,
     verify: bool,
+    via_tunnel: bool,
     names: list[str] | None = None,
 ) -> dict[str, int]:
     """Return total_rows per table from `system.tables`.
@@ -435,6 +483,7 @@ def get_clickhouse_row_count(
         password=password,
         secure=secure,
         verify=verify,
+        via_tunnel=via_tunnel,
         query_timeout=METADATA_QUERY_TIMEOUT_SECONDS,
     )
 
@@ -539,6 +588,7 @@ def get_connection_metadata(
     password: str | None,
     secure: bool,
     verify: bool,
+    via_tunnel: bool,
 ) -> dict[str, Any]:
     """Probe the server for version metadata.
 
@@ -554,6 +604,7 @@ def get_connection_metadata(
         password=password,
         secure=secure,
         verify=verify,
+        via_tunnel=via_tunnel,
         query_timeout=METADATA_QUERY_TIMEOUT_SECONDS,
     )
 
@@ -788,6 +839,7 @@ def get_primary_keys_for_schemas(
     password: str | None,
     secure: bool,
     verify: bool,
+    via_tunnel: bool,
     table_names: list[str],
 ) -> dict[str, list[str] | None]:
     """Detect primary keys (sorting key columns) for multiple tables.
@@ -809,6 +861,7 @@ def get_primary_keys_for_schemas(
             password=password,
             secure=secure,
             verify=verify,
+            via_tunnel=via_tunnel,
             query_timeout=METADATA_QUERY_TIMEOUT_SECONDS,
         )
         try:
@@ -1180,6 +1233,7 @@ def clickhouse_source(
     database: str,
     secure: bool,
     verify: bool,
+    via_tunnel: bool,
     table_names: list[str],
     should_use_incremental_field: bool,
     logger: FilteringBoundLogger,
@@ -1210,6 +1264,7 @@ def clickhouse_source(
             password=password,
             secure=secure,
             verify=verify,
+            via_tunnel=via_tunnel,
             query_timeout=METADATA_QUERY_TIMEOUT_SECONDS,
         )
 
@@ -1248,6 +1303,7 @@ def clickhouse_source(
                 password=password,
                 secure=secure,
                 verify=verify,
+                via_tunnel=via_tunnel,
                 names=[table_name],
             )
             rows_to_sync: int | None = row_counts.get(table_name)
@@ -1291,6 +1347,7 @@ def clickhouse_source(
                 password=password,
                 secure=secure,
                 verify=verify,
+                via_tunnel=via_tunnel,
                 query_timeout=DATA_QUERY_TIMEOUT_SECONDS,
                 settings=_query_settings(chunk_size),
             )

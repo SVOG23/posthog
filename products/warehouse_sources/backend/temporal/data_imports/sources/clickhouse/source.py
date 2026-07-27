@@ -302,6 +302,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
         the product — the direct-SQL adapter drives the query through this method rather than
         importing the client factory.
         """
+        via_tunnel = self.ssh_tunnel_enabled(config)
         with self.with_ssh_tunnel(config, team_id) as (host, port):
             client = _get_client(
                 host=host,
@@ -311,6 +312,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
                 password=config.password,
                 secure=config.secure,
                 verify=config.verify,
+                via_tunnel=via_tunnel,
                 query_timeout=query_timeout,
                 settings=settings,
             )
@@ -330,6 +332,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
     ) -> list[SourceSchema]:
         schemas: list[SourceSchema] = []
 
+        via_tunnel = self.ssh_tunnel_enabled(config)
         with self.with_ssh_tunnel(config, team_id) as (host, port):
             db_schemas = get_clickhouse_schemas(
                 host=host,
@@ -339,6 +342,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
                 password=config.password,
                 secure=config.secure,
                 verify=config.verify,
+                via_tunnel=via_tunnel,
                 names=names,
             )
 
@@ -352,6 +356,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
                     password=config.password,
                     secure=config.secure,
                     verify=config.verify,
+                    via_tunnel=via_tunnel,
                     names=names,
                 )
 
@@ -363,6 +368,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
                 password=config.password,
                 secure=config.secure,
                 verify=config.verify,
+                via_tunnel=via_tunnel,
                 table_names=list(db_schemas.keys()),
             )
 
@@ -449,6 +455,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
         return None
 
     def get_connection_metadata(self, config: ClickHouseSourceConfig, team_id: int) -> dict[str, object]:
+        via_tunnel = self.ssh_tunnel_enabled(config)
         with self.with_ssh_tunnel(config, team_id) as (host, port):
             return get_clickhouse_connection_metadata(
                 host=host,
@@ -458,6 +465,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
                 password=config.password,
                 secure=config.secure,
                 verify=config.verify,
+                via_tunnel=via_tunnel,
             )
 
     def source_for_pipeline(self, config: ClickHouseSourceConfig, inputs: SourceInputs) -> SourceResponse:
@@ -474,6 +482,7 @@ class ClickHouseSource(SimpleSource[ClickHouseSourceConfig], SSHTunnelMixin, Val
             database=config.database,
             secure=config.secure,
             verify=config.verify,
+            via_tunnel=self.ssh_tunnel_enabled(config),
             table_names=[inputs.schema_name],
             should_use_incremental_field=inputs.should_use_incremental_field,
             logger=inputs.logger,

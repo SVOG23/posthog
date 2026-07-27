@@ -1,4 +1,7 @@
-from collections.abc import AsyncIterable
+import socket
+import threading
+from collections.abc import AsyncIterable, Iterator
+from contextlib import contextmanager
 
 import pytest
 from posthog.test.base import BaseTest
@@ -366,6 +369,7 @@ class TestGetClickhouseRowCount:
                 password="p",
                 secure=True,
                 verify=True,
+                via_tunnel=False,
                 names=None,
             )
 
@@ -462,6 +466,7 @@ class TestGetPrimaryKeysForSchemas:
                 password="p",
                 secure=True,
                 verify=True,
+                via_tunnel=False,
                 table_names=table_names,
             )
 
@@ -787,7 +792,14 @@ class TestGetClientTransientRetry:
 
     def _connect(self):
         return _get_client(
-            host="h", port=8443, database="default", user="default", password=None, secure=True, verify=True
+            host="h",
+            port=8443,
+            database="default",
+            user="default",
+            password=None,
+            secure=True,
+            verify=True,
+            via_tunnel=False,
         )
 
     def test_retries_transient_drop_then_succeeds(self):
@@ -860,6 +872,7 @@ class TestGetClientSessionSettings:
             password=None,
             secure=True,
             verify=True,
+            via_tunnel=False,
             settings=settings,
         )
 
@@ -885,6 +898,70 @@ class TestGetClientSessionSettings:
 
         assert "settings" not in mock_get_client.call_args.kwargs
         client.set_client_setting.assert_called_once_with("max_block_size", 20000)
+
+
+class TestGetClientEgressProxyRouting:
+    """Whether the connection is handed to the egress proxy, which is what makes tunnels work.
+
+    PostHog's runtime points HTTP_PROXY at the Smokescreen egress proxy, and Smokescreen blocks
+    loopback. Routing a tunneled connection through it means the request never reaches the SSH
+    tunnel's local forwarded port, so the tunnel opens no channel to the customer's ClickHouse
+    and the source fails with a generic connection error.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _recording_server() -> Iterator[tuple[int, list[str]]]:
+        server = socket.create_server(("127.0.0.1", 0))
+        server.settimeout(0.1)
+        requests: list[str] = []
+        stop = threading.Event()
+
+        def serve() -> None:
+            while not stop.is_set():
+                try:
+                    conn, _ = server.accept()
+                except (TimeoutError, OSError):
+                    continue
+                with conn:
+                    requests.append(conn.recv(8192).decode("latin-1").split("\r\n")[0])
+                    # A deterministic status rather than dropping the connection, so `_get_client`
+                    # raises on the first attempt instead of entering its transient-retry backoff.
+                    conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            yield server.getsockname()[1], requests
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+            server.close()
+
+    @pytest.mark.parametrize("via_tunnel", [True, False])
+    def test_tunneled_connection_reaches_the_bound_port_instead_of_the_proxy(self, monkeypatch, via_tunnel):
+        with self._recording_server() as (proxy_port, proxy_requests):
+            with self._recording_server() as (bound_port, bound_requests):
+                proxy_url = f"http://127.0.0.1:{proxy_port}"
+                monkeypatch.setenv("HTTP_PROXY", proxy_url)
+                monkeypatch.setenv("http_proxy", proxy_url)
+                monkeypatch.delenv("NO_PROXY", raising=False)
+                monkeypatch.delenv("no_proxy", raising=False)
+
+                with pytest.raises(ClickHouseConnectionError):
+                    _get_client(
+                        host="127.0.0.1",
+                        port=bound_port,
+                        database="default",
+                        user="default",
+                        password=None,
+                        secure=False,
+                        verify=True,
+                        via_tunnel=via_tunnel,
+                    )
+
+        assert bool(bound_requests) is via_tunnel
+        assert bool(proxy_requests) is not via_tunnel
 
 
 class TestTranslateError:
@@ -943,6 +1020,7 @@ class TestGetSchemas:
                 password="",
                 secure=True,
                 verify=True,
+                via_tunnel=False,
             )
 
         assert set(schemas.keys()) == {"events", "users"}
@@ -972,6 +1050,7 @@ class TestGetSchemas:
                 password="",
                 secure=True,
                 verify=True,
+                via_tunnel=False,
             )
 
         assert set(schemas.keys()) == {"events"}
@@ -1252,6 +1331,7 @@ class TestGetRowsBatching:
                 database="db",
                 secure=True,
                 verify=True,
+                via_tunnel=False,
                 table_names=["events"],
                 should_use_incremental_field=False,
                 logger=MagicMock(),
