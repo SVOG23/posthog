@@ -25,7 +25,7 @@ from posthog.schema import HogQLQueryModifiers, MaterializationMode
 from posthog.hogql import ast
 from posthog.hogql.query import execute_hogql_query
 
-from posthog.models import ActivityLog, Comment, Organization, Tag, User
+from posthog.models import ActivityLog, Comment, Organization, Tag, Team, User
 from posthog.models.personal_api_key import PersonalAPIKey
 from posthog.models.utils import generate_random_token_personal, hash_key_value
 from posthog.test.persons import create_person
@@ -2404,3 +2404,137 @@ class TestAiFeedbackAPI(APIBaseTest):
             format="json",
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+@patch.object(transaction, "on_commit", side_effect=immediate_on_commit)
+class TestTicketMerge(APIBaseTest):
+    def setUp(self):
+        super().setUp()
+        self.team.conversations_enabled = True
+        self.team.save()
+        self.source = Ticket.objects.create_with_number(
+            team=self.team,
+            channel_source=Channel.WIDGET,
+            widget_session_id="source-session",
+            distinct_id="customer-a",
+            status=Status.OPEN,
+        )
+        self.target = Ticket.objects.create_with_number(
+            team=self.team,
+            channel_source=Channel.WIDGET,
+            widget_session_id="target-session",
+            distinct_id="customer-a",
+            status=Status.OPEN,
+        )
+
+    def _merge_url(self, ticket):
+        return f"/api/projects/{self.team.id}/conversations/tickets/{ticket.id}/merge/"
+
+    def _comment_for(self, ticket):
+        return Comment.objects.get(scope="conversations_ticket", item_id=str(ticket.id))
+
+    def test_merge_resolves_assigns_and_cross_links(self, mock_on_commit):
+        response = self.client.post(
+            self._merge_url(self.source),
+            {"target_ticket_id": str(self.target.id)},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["target_ticket_number"] == self.target.ticket_number
+
+        self.source.refresh_from_db()
+        assert self.source.status == Status.RESOLVED
+        assert self.source.merged_into_id == self.target.id
+        assert self.source.merged_at is not None
+        assert TicketAssignment.objects.get(ticket=self.source).user_id == self.user.id
+
+        # A note is added to both tickets, each linking to the other by number.
+        source_comment = self._comment_for(self.source)
+        target_comment = self._comment_for(self.target)
+        assert f"#{self.target.ticket_number}" in source_comment.content
+        assert f"/support/tickets/{self.target.ticket_number}" in source_comment.content
+        assert f"#{self.source.ticket_number}" in target_comment.content
+        assert f"/support/tickets/{self.source.ticket_number}" in target_comment.content
+
+    @parameterized.expand(
+        [
+            (False, False, True, True),
+            (True, False, False, True),
+            (False, True, True, False),
+            (True, True, False, False),
+        ]
+    )
+    def test_merge_note_privacy(self, mock_on_commit, source_send, target_send, source_private, target_private):
+        response = self.client.post(
+            self._merge_url(self.source),
+            {
+                "target_ticket_id": str(self.target.id),
+                "source_is_private": not source_send,
+                "target_is_private": not target_send,
+            },
+            format="json",
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert self._comment_for(self.source).item_context["is_private"] is source_private
+        assert self._comment_for(self.target).item_context["is_private"] is target_private
+
+    def test_merge_appends_optional_notes(self, mock_on_commit):
+        response = self.client.post(
+            self._merge_url(self.source),
+            {
+                "target_ticket_id": str(self.target.id),
+                "source_note": "handled in the other thread",
+                "target_note": "dup of the older report",
+            },
+            format="json",
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert "handled in the other thread" in self._comment_for(self.source).content
+        assert "dup of the older report" in self._comment_for(self.target).content
+
+    def test_cannot_merge_into_self(self, mock_on_commit):
+        response = self.client.post(
+            self._merge_url(self.source),
+            {"target_ticket_id": str(self.source.id)},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        self.source.refresh_from_db()
+        assert self.source.merged_into_id is None
+
+    def test_cannot_merge_already_merged_ticket(self, mock_on_commit):
+        self.source.merged_into = self.target
+        self.source.save(update_fields=["merged_into"])
+        other = Ticket.objects.create_with_number(
+            team=self.team,
+            channel_source=Channel.WIDGET,
+            widget_session_id="other-session",
+            distinct_id="customer-a",
+            status=Status.OPEN,
+        )
+        response = self.client.post(
+            self._merge_url(self.source),
+            {"target_ticket_id": str(other.id)},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        self.source.refresh_from_db()
+        assert self.source.merged_into_id == self.target.id
+
+    def test_cannot_merge_into_other_team_ticket(self, mock_on_commit):
+        other_team = Team.objects.create(organization=self.organization, name="Other")
+        foreign_target = Ticket.objects.create_with_number(
+            team=other_team,
+            channel_source=Channel.WIDGET,
+            widget_session_id="foreign-session",
+            distinct_id="customer-z",
+            status=Status.OPEN,
+        )
+        response = self.client.post(
+            self._merge_url(self.source),
+            {"target_ticket_id": str(foreign_target.id)},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        self.source.refresh_from_db()
+        assert self.source.merged_into_id is None

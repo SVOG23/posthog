@@ -45345,6 +45345,21 @@ export namespace Schemas {
       readonly organization_id_source: string | null;
       readonly person: TicketPerson | null;
       tags?: unknown[];
+      /**
+         * When this ticket was merged into another ticket. Null if it has not been merged.
+         * @nullable
+         */
+      readonly merged_at: string | null;
+      /**
+         * UUID of the ticket this ticket was merged into. Null if this ticket has not been merged.
+         * @nullable
+         */
+      readonly merged_into_id: string | null;
+      /**
+         * Human-readable number of the ticket this ticket was merged into. Null if not merged.
+         * @nullable
+         */
+      readonly merged_into_ticket_number: number | null;
     }
 
     export interface PaginatedTicketList {
@@ -53361,6 +53376,21 @@ export namespace Schemas {
       readonly organization_id_source?: string | null;
       readonly person?: TicketPerson | null;
       tags?: unknown[];
+      /**
+         * When this ticket was merged into another ticket. Null if it has not been merged.
+         * @nullable
+         */
+      readonly merged_at?: string | null;
+      /**
+         * UUID of the ticket this ticket was merged into. Null if this ticket has not been merged.
+         * @nullable
+         */
+      readonly merged_into_id?: string | null;
+      /**
+         * Human-readable number of the ticket this ticket was merged into. Null if not merged.
+         * @nullable
+         */
+      readonly merged_into_ticket_number?: number | null;
     }
 
     /**
@@ -68929,6 +68959,42 @@ export namespace Schemas {
     export interface TicketError {
       detail: string;
       error_type?: string;
+    }
+
+    /**
+     * Payload for merging this ticket into another ticket.
+     */
+    export interface TicketMergeRequest {
+      /** UUID of the ticket to merge this ticket into. */
+      target_ticket_id: string;
+      /**
+         * Optional extra text appended to the note added to this (merged) ticket.
+         * @maxLength 5000
+         */
+      source_note?: string;
+      /** If true, the note added to this ticket is an internal note. If false, it is delivered to the customer over the ticket's channel. */
+      source_is_private?: boolean;
+      /**
+         * Optional extra text appended to the note added to the target ticket.
+         * @maxLength 5000
+         */
+      target_note?: string;
+      /** If true, the note added to the target ticket is an internal note. If false, it is delivered to the customer over the ticket's channel. */
+      target_is_private?: boolean;
+    }
+
+    /**
+     * Result of merging a ticket into another ticket.
+     */
+    export interface TicketMergeResponse {
+      /** UUID of the merged (source) ticket. */
+      id: string;
+      /** New status of the merged ticket (resolved). */
+      ticket_status: string;
+      /** UUID of the ticket this ticket was merged into. */
+      target_ticket_id: string;
+      /** Human-readable number of the target ticket. */
+      target_ticket_number: number;
     }
 
     /**
