@@ -128,9 +128,3 @@ def duckgres_sink_enablement() -> SinkEnablement | None:
             logger.exception("duckgres_sink_flag_evaluation_failed", team_id=row.team_id)
             capture_exception(e)
     return SinkEnablement(team_ids=enabled, team_org_budgets=team_org_budgets)
-
-
-def duckgres_sink_team_ids() -> list[int] | None:
-    """Back-compat view of duckgres_sink_enablement: just the enabled team ids."""
-    enablement = duckgres_sink_enablement()
-    return None if enablement is None else enablement.team_ids

@@ -192,6 +192,35 @@ class TestEnsureManagedWarehouseDirectSource:
         assert source.connection_metadata["reader_configured"] is True
         assert ExternalDataSource.objects.filter(team=team, prefix=MANAGED_WAREHOUSE_SOURCE_PREFIX).count() == 1
 
+    def test_membership_removal_during_reader_setup_keeps_source_disabled(self) -> None:
+        org = Organization.objects.create(name="Org")
+        team = Team.objects.create(organization=org)
+        DuckgresServer.objects.create(
+            organization=org,
+            host=_CONNECTION["host"],
+            port=_CONNECTION["port"],
+            database=_CONNECTION["database"],
+            username=_CONNECTION["username"],
+            password=_CONNECTION["password"],
+        )
+        _add_membership(team)
+
+        def remove_membership(*, team_id: int, password: str, **_kwargs: object) -> dict[str, str]:
+            _clear_memberships()
+            return {"username": f"posthog_team_{team_id}", "password": password}
+
+        with (
+            patch.object(managed_warehouse, "configure_project_reader", side_effect=remove_membership),
+            pytest.raises(ValueError, match="has not joined"),
+        ):
+            _ensure(team)
+
+        source = ExternalDataSource.objects.get(team_id=team.id, prefix=MANAGED_WAREHOUSE_SOURCE_PREFIX)
+        assert source.direct_query_enabled is False
+        connection_metadata = source.connection_metadata
+        assert connection_metadata is not None
+        assert connection_metadata["reader_configured"] is False
+
     def test_does_not_expose_legacy_shared_tables(self) -> None:
         org = Organization.objects.create(name="Org")
         team = Team.objects.create(organization=org)
@@ -416,6 +445,22 @@ class TestReconcileManagedWarehouseTables:
             get_schemas.assert_called_once()
         source = ExternalDataSource.objects.get(team_id=team.id, prefix=MANAGED_WAREHOUSE_SOURCE_PREFIX)
         assert ExternalDataSchema.objects.filter(source=source, name=f"shadow_{team.id}_models.new_model").exists()
+
+    def test_membership_removal_during_introspection_does_not_register_schemas(self) -> None:
+        org, team = self._setup()
+        source = _ensure(team)
+
+        def remove_membership(*_args: object, **_kwargs: object) -> list[SourceSchema]:
+            _clear_memberships()
+            return [_source_schema("events_prod")]
+
+        with patch(
+            "products.warehouse_sources.backend.temporal.data_imports.sources.postgres.source.PostgresSource.get_schemas",
+            side_effect=remove_membership,
+        ):
+            reconcile_managed_warehouse_tables(team_id=team.id, organization_id=org.id)
+
+        assert not ExternalDataSchema.objects.filter(source=source).exists()
 
     def test_reintrospection_revives_a_dropped_and_recreated_table(self) -> None:
         org, team = self._setup()

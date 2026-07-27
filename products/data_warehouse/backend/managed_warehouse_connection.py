@@ -153,7 +153,7 @@ def _ensure_managed_source_locked(
     )
 
 
-def _membership_table_suffix(*, team_id: int, organization_id: str | UUID) -> str:
+def _membership_table_suffix(*, team_id: int, organization_id: str | UUID, use_cache: bool = True) -> str:
     """The team's warehouse table suffix from its duckgres control-plane row.
 
     Raises RuntimeError when the control plane can't answer (callers treat that like the
@@ -163,7 +163,7 @@ def _membership_table_suffix(*, team_id: int, organization_id: str | UUID) -> st
     """
     from posthog.ducklake import cp_teams, team_state  # noqa: PLC0415 — keeps duckdb off this module's import path
 
-    teams = cp_teams.list_org_teams(str(organization_id))
+    teams = cp_teams.list_org_teams(str(organization_id), use_cache=use_cache)
     if teams is None:
         raise RuntimeError("The managed warehouse control plane is unreachable")
     row = next((team for team in teams if team.team_id == team_id), None)
@@ -179,7 +179,7 @@ def ensure_managed_warehouse_direct_source(*, team_id: int, organization_id: str
     """Create or refresh the team's restricted live-query source from its membership."""
     from posthog.ducklake.models import DuckgresServer  # noqa: PLC0415
 
-    table_suffix = _membership_table_suffix(team_id=team_id, organization_id=organization_id)
+    table_suffix = _membership_table_suffix(team_id=team_id, organization_id=organization_id, use_cache=False)
 
     with transaction.atomic():
         server = DuckgresServer.objects.select_for_update().get(organization_id=organization_id)
@@ -229,6 +229,10 @@ def ensure_managed_warehouse_direct_source(*, team_id: int, organization_id: str
     if credentials != {"username": username, "password": password}:
         raise RuntimeError("Managed warehouse reader credentials did not match the requested credentials")
 
+    current_table_suffix = _membership_table_suffix(team_id=team_id, organization_id=organization_id, use_cache=False)
+    if current_table_suffix != table_suffix:
+        raise ValueError("The team's managed warehouse membership changed while its reader was configured")
+
     with transaction.atomic():
         DuckgresServer.objects.select_for_update().get(organization_id=organization_id)
         Team.objects.select_for_update().only("id").get(id=team_id, organization_id=organization_id)
@@ -256,6 +260,11 @@ def reconcile_managed_warehouse_tables(*, team_id: int, organization_id: str | U
         # The credential handshake needs the warehouse control plane; while an org is still
         # provisioning this fails on every sweep, so skip quietly and let the next run retry.
         logger.info("Managed warehouse reader handshake not possible yet", team_id=team_id)
+        return
+
+    try:
+        table_suffix = _membership_table_suffix(team_id=team_id, organization_id=organization_id, use_cache=False)
+    except (RuntimeError, ValueError):
         return
 
     with transaction.atomic():
@@ -300,8 +309,17 @@ def reconcile_managed_warehouse_tables(*, team_id: int, organization_id: str | U
     if not source_schemas:
         return
 
+    try:
+        current_table_suffix = _membership_table_suffix(
+            team_id=team_id, organization_id=organization_id, use_cache=False
+        )
+    except (RuntimeError, ValueError):
+        return
+    if current_table_suffix != table_suffix:
+        return
+
     with transaction.atomic():
-        # Revalidate after live introspection so deprovision wins the race.
+        # The fresh CP read above ensures membership removal also wins this race.
         server = DuckgresServer.objects.select_for_update().filter(organization_id=organization_id).first()
         team = Team.objects.select_for_update().only("id").filter(id=team_id, organization_id=organization_id).first()
         if server is None or team is None:
