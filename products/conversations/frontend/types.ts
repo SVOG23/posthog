@@ -180,6 +180,9 @@ export interface Ticket {
     person?: TicketPerson | null
     tags?: string[]
     ai_triage?: AITriage
+    merged_at?: string | null
+    merged_into_id?: string | null
+    merged_into_ticket_number?: number | null
 }
 
 export interface ConversationTicket {

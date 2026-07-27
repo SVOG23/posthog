@@ -3,7 +3,7 @@ import { combineUrl, router } from 'kea-router'
 import { useRef } from 'react'
 
 import { IconChevronDown } from '@posthog/icons'
-import { LemonButton, LemonCard, LemonSelect, LemonTag, Link, Spinner } from '@posthog/lemon-ui'
+import { LemonBanner, LemonButton, LemonCard, LemonSelect, LemonTag, Link, Spinner } from '@posthog/lemon-ui'
 
 import { Resizer } from 'lib/components/Resizer/Resizer'
 import { ResizerLogicProps, resizerLogic } from 'lib/components/Resizer/resizerLogic'
@@ -31,6 +31,7 @@ import { TicketTags } from '../../components/TicketTags'
 import { type TicketPriority, type TicketStatus, priorityOptions, statusOptionsWithoutAll } from '../../types'
 import { AIPanel } from './AIPanel'
 import { ExceptionsPanel } from './ExceptionsPanel'
+import { TicketActions } from './MergeTicketModal'
 import { PreviousTicketsPanel } from './PreviousTicketsPanel'
 import { RecentEventsPanel } from './RecentEventsPanel'
 import { RelatedGroupsPanel } from './RelatedGroupsPanel'
@@ -118,6 +119,9 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
         setDraftModeEnabled,
         dismissKnowledgeGap,
         submitAiReplyFeedback,
+        loadTicket,
+        loadMessages,
+        loadTickets,
     } = useActions(logic)
 
     const { user } = useValues(userLogic)
@@ -199,6 +203,16 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
                 resourceType={{ type: 'conversation' }}
                 forceBackTo={ticketListBackTo(searchParams)}
             />
+
+            {ticket?.merged_into_id && (
+                <LemonBanner type="info">
+                    Merged into{' '}
+                    <Link to={urls.supportTicketDetail(ticket.merged_into_ticket_number as number)}>
+                        #{ticket.merged_into_ticket_number}
+                    </Link>
+                    .
+                </LemonBanner>
+            )}
 
             <div className="flex flex-col lg:flex-row items-start lg:min-h-0 lg:flex-1">
                 <div
@@ -467,7 +481,17 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
                                 <TicketTags tags={tags} onChange={setTags} saving={false} />
                             </div>
                         </div>
-                        <div className="mt-3 pt-3 border-t flex justify-end">
+                        <div className="mt-3 pt-3 border-t flex justify-end gap-2">
+                            {ticket && (
+                                <TicketActions
+                                    sourceTicket={ticket}
+                                    onMerged={() => {
+                                        loadTicket()
+                                        loadMessages()
+                                        loadTickets()
+                                    }}
+                                />
+                            )}
                             <LemonButton
                                 type="primary"
                                 size="small"
