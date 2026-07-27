@@ -114,7 +114,9 @@ def build_windows(
         windows.append((cursor, end))
         cursor = end
 
-    return windows or [(start, now)]
+    if not windows:
+        windows.append((start, now))
+    return windows
 
 
 def window_key(window: Window) -> Optional[str]:
@@ -143,7 +145,10 @@ class EbayClient:
         self._refresh_token = refresh_token
         self._marketplace_id = marketplace_id
         self._logger = logger
-        self._session = make_tracked_session(redact_values=(client_secret, refresh_token))
+        # Order, transaction, and payout responses carry buyer and seller PII (addresses,
+        # notes, payout instruments) that the name-based scrubbers cannot reliably sanitise,
+        # so keep these bodies out of the shared HTTP sample store.
+        self._session = make_tracked_session(redact_values=(client_secret, refresh_token), capture=False)
         # The token exchange body carries both the refresh token and a freshly minted
         # access token, neither of which the name-based scrubbers recognise.
         self._auth_session = make_tracked_session(redact_values=(client_secret, refresh_token), capture=False)

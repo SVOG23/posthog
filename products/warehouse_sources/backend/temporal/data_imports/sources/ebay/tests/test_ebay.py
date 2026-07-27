@@ -257,6 +257,18 @@ class TestEbayClient:
         ):
             return EbayClient(PROD_HOST, "app-id", "cert-id", "refresh", "EBAY_US", MagicMock())
 
+    def test_no_session_captures_http_samples(self) -> None:
+        # Order/transaction/payout bodies carry buyer and seller PII, so no session the
+        # client builds may write responses to the shared HTTP sample store.
+        with patch(
+            "products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay.make_tracked_session",
+            return_value=_FakeSession(),
+        ) as make_session:
+            EbayClient(PROD_HOST, "app-id", "cert-id", "refresh", "EBAY_US", MagicMock())
+        assert make_session.call_count >= 1
+        for call in make_session.call_args_list:
+            assert call.kwargs.get("capture") is False
+
     def test_token_exchange_uses_basic_auth_and_the_refresh_grant(self) -> None:
         session = _FakeSession()
         client = self._client(session)
