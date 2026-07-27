@@ -152,9 +152,14 @@ class SellingPartnerClient:
         # Retries live in `_request` (tenacity) so POSTs and the report-job polling loop
         # are covered too; a transport-level policy would only cover idempotent verbs and
         # would compound with this one.
+        # `capture=False`: every SP-API call carries a freshly minted `x-amz-access-token`
+        # bearer and the LWA mint response returns it in the body, neither of which the
+        # name-based scrubbers recognise; responses can also hold buyer PII. Keep the
+        # session metered and logged, but out of HTTP sample capture.
         self._session = make_tracked_session(
             retry=Retry(total=0),
             redact_values=(client_secret, refresh_token),
+            capture=False,
         )
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
@@ -466,7 +471,9 @@ def _download_report_document(client: SellingPartnerClient, document_id: str) ->
 
     # The URL is presigned S3: sending our own Authorization/token headers alongside the
     # query-string credentials makes S3 reject the request, so it gets a bare session.
-    download_session = make_tracked_session()
+    # `capture=False`: the response body is the seller's report (buyer PII) and the URL
+    # carries AWS `X-Amz-*` signing credentials, so keep it out of HTTP sample capture.
+    download_session = make_tracked_session(capture=False)
     response = download_session.get(str(url), timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
 

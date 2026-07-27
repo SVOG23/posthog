@@ -162,6 +162,14 @@ class TestHelpers:
 
 class TestTokenLifecycle:
     @mock.patch(f"{_MODULE}.make_tracked_session")
+    def test_client_session_disables_http_sample_capture(self, mock_session: mock.MagicMock) -> None:
+        # Every SP-API call carries a minted `x-amz-access-token` bearer and responses can
+        # hold buyer PII, none of which the name-based scrubbers recognise — so the client
+        # session must stay out of HTTP sample capture.
+        _client()
+        assert mock_session.call_args.kwargs["capture"] is False
+
+    @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_token_is_reused_until_it_expires(self, mock_session: mock.MagicMock) -> None:
         mock_session.return_value.post.return_value = _token_response()
         client = _client()
@@ -506,6 +514,30 @@ class TestSalesAndTrafficReport:
         assert create_call.kwargs["json"]["reportOptions"] == {"dateGranularity": "DAY", "asinGranularity": "PARENT"}
         # The in-flight report id is checkpointed so a resume doesn't recreate the job.
         assert any(call.args[0].report_id == "R1" for call in manager.save_state.call_args_list)
+
+    @mock.patch(f"{_MODULE}.make_tracked_session")
+    def test_report_download_disables_http_sample_capture(self, mock_session: mock.MagicMock) -> None:
+        rows = [{"date": "2024-05-01"}]
+        mock_session.return_value.post.return_value = _token_response()
+        mock_session.return_value.request.side_effect = [
+            _response({"reportId": "R1"}),
+            _response({"processingStatus": "DONE", "reportDocumentId": "D1"}),
+            _response({"url": "https://s3.example/doc"}),
+        ]
+        mock_session.return_value.get.return_value = _response(
+            content=json.dumps({"salesAndTrafficByDate": rows}).encode()
+        )
+
+        _collect(
+            "sales_and_traffic",
+            should_use_incremental_field=True,
+            db_incremental_field_last_value=self._recent_watermark(),
+        )
+
+        # The report body is buyer PII and the presigned URL carries AWS signing creds, so
+        # the download session must stay out of HTTP sample capture just like the client's.
+        assert mock_session.call_count >= 2
+        assert all(call.kwargs.get("capture") is False for call in mock_session.call_args_list)
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_uncompressed_document_is_parsed_too(self, mock_session: mock.MagicMock) -> None:
