@@ -1,0 +1,38 @@
+import { BellIcon } from "@phosphor-icons/react";
+import { useTaskActivity } from "@posthog/ui/features/canvas/hooks/useTaskActivity";
+import { SidebarItem } from "../SidebarItem";
+import { SidebarCountBadge } from "./SidebarCountBadge";
+
+interface ActivityItemProps {
+  isActive: boolean;
+  onClick: () => void;
+  depth?: number;
+}
+
+// The Activity nav row with its unread dot. Owns the task-activity subscription
+// so the query mounts once here; the badge counts tasks whose activity is newer
+// than the last time the Activity page was opened.
+export function ActivityItem({
+  isActive,
+  onClick,
+  depth = 0,
+}: ActivityItemProps) {
+  const { unreadCount } = useTaskActivity();
+  return (
+    <SidebarItem
+      depth={depth}
+      icon={<BellIcon size={16} weight={isActive ? "fill" : "regular"} />}
+      label={
+        <>
+          Activity
+          <SidebarCountBadge
+            count={unreadCount}
+            title={`${unreadCount} new ${unreadCount === 1 ? "update" : "updates"}`}
+          />
+        </>
+      }
+      isActive={isActive}
+      onClick={onClick}
+    />
+  );
+}
