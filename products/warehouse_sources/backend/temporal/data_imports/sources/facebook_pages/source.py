@@ -52,6 +52,12 @@ class FacebookPagesSource(ResumableSource[FacebookPagesSourceConfig, FacebookPag
         return ExternalDataSourceType.FACEBOOKPAGES
 
     @property
+    def connection_host_fields(self) -> list[str]:
+        # page_id selects which Page the stored token reads from; changing it must require
+        # re-entering the secrets so a preserved token can't be retargeted at another Page.
+        return ["page_id"]
+
+    @property
     def get_source_config(self) -> SourceConfig:
         return SourceConfig(
             name=SchemaExternalDataSourceType.FACEBOOK_PAGES,

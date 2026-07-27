@@ -80,6 +80,12 @@ class TestFacebookPagesSource:
         # get_schemas iterates a static catalog with no I/O, so public docs can render the tables.
         assert self.source.lists_tables_without_credentials is True
 
+    def test_page_id_forces_secret_reentry_on_change(self) -> None:
+        # page_id retargets the stored token at another Page, so changing it must require
+        # re-entering the secrets — otherwise an editor who can't read the token could sync a
+        # different Page the token happens to have access to.
+        assert self.source.connection_host_fields == ["page_id"]
+
     @pytest.mark.parametrize("expected_key", [AUTH_ERROR_PREFIX, PERMISSION_ERROR_PREFIX])
     def test_non_retryable_errors(self, expected_key: str) -> None:
         assert expected_key in self.source.get_non_retryable_errors()
