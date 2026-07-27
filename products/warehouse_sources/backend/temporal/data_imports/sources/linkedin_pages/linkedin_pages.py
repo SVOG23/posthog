@@ -49,6 +49,11 @@ INCREMENTAL_OVERLAP_DAYS = 1
 # window is the per-app/member daily call budget and only resets at midnight UTC.
 _DAY_THROTTLE_PATTERN = re.compile(r"\bDAY\b")
 
+# Configured organization IDs become URN path segments (see `get_organization`), so they must be
+# genuine numeric organization/organizationBrand URNs — never anything that could inject path
+# segments like `../me` and retarget the authenticated request.
+_ORGANIZATION_URN_PATTERN = re.compile(r"urn:li:(?:organization|organizationBrand):[0-9]+")
+
 
 class LinkedinPagesRetryableError(Exception):
     """Transient LinkedIn response (5xx, short-window 429, malformed body) — worth another attempt."""
@@ -139,7 +144,13 @@ def organization_urns_from_config(raw: str | None) -> list[str]:
         value = part.strip()
         if not value:
             continue
-        urns.append(value if value.startswith("urn:") else f"urn:li:organization:{value}")
+        urn = value if value.startswith("urn:") else f"urn:li:organization:{value}"
+        if not _ORGANIZATION_URN_PATTERN.fullmatch(urn):
+            raise ValueError(
+                f"Invalid organization ID {value!r}: expected a numeric ID or a "
+                "urn:li:organization / urn:li:organizationBrand URN"
+            )
+        urns.append(urn)
     return urns
 
 

@@ -132,6 +132,21 @@ class TestLinkedinPagesTransport:
         assert organization_urns_from_config(raw) == expected
 
     @pytest.mark.parametrize(
+        "raw",
+        [
+            "../me",
+            "123/../../me",
+            "urn:li:organization:../me",
+            "urn:li:person:9",
+            "abc",
+        ],
+    )
+    def test_organization_urns_from_config_rejects_non_numeric_ids(self, raw: str) -> None:
+        # These would otherwise become URN path segments and retarget the authenticated request.
+        with pytest.raises(ValueError):
+            organization_urns_from_config(raw)
+
+    @pytest.mark.parametrize(
         "urn, expected",
         [
             (ORG_ONE, "/organizations"),
