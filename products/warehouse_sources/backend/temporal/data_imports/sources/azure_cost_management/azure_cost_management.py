@@ -77,9 +77,11 @@ def normalize_scope(scope: str) -> str:
     host (or scheme) is rejected rather than silently repointing our credentialed requests.
     """
     raw = (scope or "").strip()
-    # Checked before the leading slashes are trimmed, so a protocol-relative host is caught rather
-    # than quietly becoming a path segment.
-    if "://" in raw or raw.startswith("//"):
+    # The scope is interpolated into the request URL, so reject anything that could break out of
+    # the path: a scheme/host (`://` or a protocol-relative `//`), or a delimiter (`?`, `#`, `\`)
+    # that would push the appended Cost Management path into the query string or fragment and
+    # repoint the credentialed request at an arbitrary ARM operation.
+    if "://" in raw or raw.startswith("//") or any(char in raw for char in ("?", "#", "\\")):
         raise ValueError("Azure Cost Management scope must be an ARM path, not a URL")
 
     trimmed = raw.strip("/")

@@ -170,6 +170,11 @@ class TestNormalizeScope:
             # A scope carrying its own host would repoint our credentialed requests at it.
             ("absolute_url", "https://evil.example/subscriptions/abc"),
             ("protocol_relative", "//evil.example/subscriptions/abc"),
+            # A `?`/`#` would push the appended Cost Management path into the query/fragment,
+            # leaving the credentialed request pointed at an arbitrary ARM operation.
+            ("query_delimiter", "subscriptions/abc/resources?api-version=2021-04-01"),
+            ("fragment_delimiter", "subscriptions/abc/resources#"),
+            ("backslash", "subscriptions\\abc"),
         ]
     )
     def test_rejects_non_path_scopes(self, _name: str, raw: str) -> None:
