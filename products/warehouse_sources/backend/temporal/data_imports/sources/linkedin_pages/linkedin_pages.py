@@ -241,7 +241,10 @@ class LinkedinPagesClient:
         self._refresh_token = refresh_token
         self._api_version = api_version
         self._access_token: Optional[str] = None
-        self._session = make_tracked_session(redact_values=(client_secret, refresh_token))
+        # capture=False: pulled bodies carry free-form customer content (post commentary,
+        # organization details, demographic analytics) that the name-based sample scrubbers
+        # can't recognise. redact_values still masks the credentials in logged URLs.
+        self._session = make_tracked_session(redact_values=(client_secret, refresh_token), capture=False)
         # The token exchange posts the client secret and refresh token in the body and gets an
         # access token back, none of which the name-based sample scrubbers would recognise.
         self._auth_session = make_tracked_session(redact_values=(client_secret, refresh_token), capture=False)
