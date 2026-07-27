@@ -15,10 +15,11 @@ import structlog
 from clickhouse_connect import get_client
 from clickhouse_connect.driver.client import Client as ClickHouseClient
 from clickhouse_connect.driver.exceptions import ClickHouseError, ProgrammingError
-from clickhouse_connect.driver.httputil import get_pool_manager
+from clickhouse_connect.driver.httputil import all_managers, get_pool_manager_options
 from dlt.common.normalizers.naming.snake_case import NamingConvention
 from structlog.types import FilteringBoundLogger
 from urllib3 import PoolManager
+from urllib3.response import HTTPResponse
 
 from posthog.exceptions_capture import capture_exception
 
@@ -177,6 +178,30 @@ def _apply_session_settings(client: ClickHouseClient, settings: dict[str, Any]) 
             )
 
 
+class _NoRedirectPoolManager(PoolManager):
+    """A urllib3 manager that refuses to follow redirects.
+
+    Only tunneled connections use this manager, and those are exactly the ones that skip the
+    egress proxy. urllib3 follows a cross-host redirect on the same manager, so without this
+    an endpoint on the far side of the tunnel could answer with a redirect to an arbitrary
+    address and we would fetch it directly from the worker, which is the reachability the
+    proxy exists to deny. A ClickHouse HTTP endpoint has no reason to redirect us, so
+    refusing costs nothing: the 3xx response goes back to clickhouse-connect, which reports
+    it as a connection error.
+
+    Enforced by overriding `urlopen` rather than through the pool's `retries` option because
+    clickhouse-connect passes its own `retries` on every request, which would take precedence
+    over a pool-level default.
+    """
+
+    # The urllib3 1.26 stub types `urlopen` with the generic `RequestMethods` parameters and
+    # omits `redirect`, even though it is the real third parameter of `PoolManager.urlopen`.
+    # Declaring the stub's parameters instead would forward `encode_multipart` down to
+    # `HTTPConnectionPool.urlopen`, which rejects it, so match the runtime signature.
+    def urlopen(self, method: str, url: str, redirect: bool = True, **kw: Any) -> HTTPResponse:  # type: ignore[override]
+        return super().urlopen(method, url, redirect=False, **kw)
+
+
 # Keyed by whether TLS certificates are verified, so a plain-HTTP tunnel and an
 # HTTPS-with-`verify=False` tunnel don't share one manager. Cached because
 # clickhouse-connect only closes a pool manager it built itself and registers every manager
@@ -201,9 +226,12 @@ def _proxyless_pool_manager(*, verify: bool) -> PoolManager:
     with _PROXYLESS_POOL_MANAGERS_LOCK:
         manager = _PROXYLESS_POOL_MANAGERS.get(verify)
         if manager is None:
-            # clickhouse-connect's own factory, so the TCP keepalive tuning and certificate
-            # handling match what the library would have configured for a direct connection.
-            manager = get_pool_manager(verify=verify)
+            # Built from clickhouse-connect's own options factory so the TCP keepalive tuning
+            # and certificate handling match what the library configures for a direct
+            # connection, then recorded where the library tracks its own managers so that
+            # connection expiry and interpreter-exit cleanup cover this one too.
+            manager = _NoRedirectPoolManager(**get_pool_manager_options(verify=verify))
+            all_managers[manager] = int(time.time())
             _PROXYLESS_POOL_MANAGERS[verify] = manager
         return manager
 

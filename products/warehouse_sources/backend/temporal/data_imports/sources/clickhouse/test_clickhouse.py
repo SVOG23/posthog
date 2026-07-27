@@ -1,3 +1,4 @@
+import os
 import socket
 import threading
 from collections.abc import AsyncIterable, Iterator
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pyarrow as pa
 from clickhouse_connect.driver.exceptions import ClickHouseError, OperationalError, ProgrammingError
+from parameterized import parameterized
 
 from products.warehouse_sources.backend.models.external_data_schema import ExternalDataSchema
 from products.warehouse_sources.backend.models.external_data_source import ExternalDataSource
@@ -900,68 +902,89 @@ class TestGetClientSessionSettings:
         client.set_client_setting.assert_called_once_with("max_block_size", 20000)
 
 
+_FORBIDDEN_RESPONSE = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+
+@contextmanager
+def _recording_server(response: bytes = _FORBIDDEN_RESPONSE) -> Iterator[tuple[int, list[str]]]:
+    server = socket.create_server(("127.0.0.1", 0))
+    server.settimeout(0.1)
+    requests: list[str] = []
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except (TimeoutError, OSError):
+                continue
+            with conn:
+                requests.append(conn.recv(8192).decode("latin-1").split("\r\n")[0])
+                conn.sendall(response)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield server.getsockname()[1], requests
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        server.close()
+
+
+def _connect_via(*, port: int, via_tunnel: bool) -> None:
+    _get_client(
+        host="127.0.0.1",
+        port=port,
+        database="default",
+        user="default",
+        password=None,
+        secure=False,
+        verify=True,
+        via_tunnel=via_tunnel,
+    )
+
+
 class TestGetClientEgressProxyRouting:
-    """Whether the connection is handed to the egress proxy, which is what makes tunnels work.
+    """Where the connection actually goes, which is what decides whether a tunnel works.
 
     PostHog's runtime points HTTP_PROXY at the Smokescreen egress proxy, and Smokescreen blocks
     loopback. Routing a tunneled connection through it means the request never reaches the SSH
     tunnel's local forwarded port, so the tunnel opens no channel to the customer's ClickHouse
-    and the source fails with a generic connection error.
+    and the source fails with a generic connection error. The stub servers answer with a
+    deterministic 403 rather than dropping the connection so that `_get_client` raises on the
+    first attempt instead of entering its transient-retry backoff.
     """
 
-    @staticmethod
-    @contextmanager
-    def _recording_server() -> Iterator[tuple[int, list[str]]]:
-        server = socket.create_server(("127.0.0.1", 0))
-        server.settimeout(0.1)
-        requests: list[str] = []
-        stop = threading.Event()
-
-        def serve() -> None:
-            while not stop.is_set():
-                try:
-                    conn, _ = server.accept()
-                except (TimeoutError, OSError):
-                    continue
-                with conn:
-                    requests.append(conn.recv(8192).decode("latin-1").split("\r\n")[0])
-                    # A deterministic status rather than dropping the connection, so `_get_client`
-                    # raises on the first attempt instead of entering its transient-retry backoff.
-                    conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-
-        thread = threading.Thread(target=serve, daemon=True)
-        thread.start()
-        try:
-            yield server.getsockname()[1], requests
-        finally:
-            stop.set()
-            thread.join(timeout=5)
-            server.close()
-
-    @pytest.mark.parametrize("via_tunnel", [True, False])
-    def test_tunneled_connection_reaches_the_bound_port_instead_of_the_proxy(self, monkeypatch, via_tunnel):
-        with self._recording_server() as (proxy_port, proxy_requests):
-            with self._recording_server() as (bound_port, bound_requests):
+    @parameterized.expand([("tunneled", True), ("direct", False)])
+    def test_only_a_direct_connection_goes_through_the_egress_proxy(self, _name: str, via_tunnel: bool) -> None:
+        with _recording_server() as (proxy_port, proxy_requests):
+            with _recording_server() as (bound_port, bound_requests):
                 proxy_url = f"http://127.0.0.1:{proxy_port}"
-                monkeypatch.setenv("HTTP_PROXY", proxy_url)
-                monkeypatch.setenv("http_proxy", proxy_url)
-                monkeypatch.delenv("NO_PROXY", raising=False)
-                monkeypatch.delenv("no_proxy", raising=False)
+                with patch.dict(os.environ, {"HTTP_PROXY": proxy_url, "http_proxy": proxy_url}):
+                    os.environ.pop("NO_PROXY", None)
+                    os.environ.pop("no_proxy", None)
 
-                with pytest.raises(ClickHouseConnectionError):
-                    _get_client(
-                        host="127.0.0.1",
-                        port=bound_port,
-                        database="default",
-                        user="default",
-                        password=None,
-                        secure=False,
-                        verify=True,
-                        via_tunnel=via_tunnel,
-                    )
+                    with pytest.raises(ClickHouseConnectionError):
+                        _connect_via(port=bound_port, via_tunnel=via_tunnel)
 
         assert bool(bound_requests) is via_tunnel
         assert bool(proxy_requests) is not via_tunnel
+
+    def test_redirect_away_from_the_tunnel_is_not_followed(self) -> None:
+        # A tunneled connection skips the egress proxy, so following a redirect would let the
+        # host on the far side of the tunnel send us to an address the proxy would have denied.
+        with _recording_server() as (elsewhere_port, elsewhere_requests):
+            redirect = (
+                f"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{elsewhere_port}/\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n"
+            ).encode()
+            with _recording_server(response=redirect) as (bound_port, bound_requests):
+                with pytest.raises(ClickHouseConnectionError):
+                    _connect_via(port=bound_port, via_tunnel=True)
+
+        assert bound_requests
+        assert elsewhere_requests == []
 
 
 class TestTranslateError:
