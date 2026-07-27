@@ -25,13 +25,13 @@ from posthog.schema import HogQLQueryModifiers, MaterializationMode
 from posthog.hogql import ast
 from posthog.hogql.query import execute_hogql_query
 
-from posthog.models import ActivityLog, Comment, Organization, Tag, User
+from posthog.models import ActivityLog, Comment, Organization, Tag, Team, User
 from posthog.models.personal_api_key import PersonalAPIKey
 from posthog.models.utils import generate_random_token_personal, hash_key_value
 from posthog.test.persons import create_person
 
 from products.conversations.backend.api.tickets import TicketReplyRequestSerializer
-from products.conversations.backend.models import Ticket, TicketAssignment
+from products.conversations.backend.models import Ticket, TicketAssignment, TicketView
 from products.conversations.backend.models.constants import Channel, ChannelDetail, Priority, Status
 from products.conversations.backend.person_lookup import PERSON_EMAIL_LOOKUP_QUERY, _get_persons_by_email
 
@@ -2370,3 +2370,87 @@ class TestAiFeedbackAPI(APIBaseTest):
             format="json",
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+class TestTicketViewParamFilter(APIBaseTest):
+    def _create_ticket(self, **kwargs) -> Ticket:
+        defaults = {
+            "team": self.team,
+            "channel_source": Channel.WIDGET,
+            "widget_session_id": f"session-{Ticket.objects.count()}",
+            "distinct_id": "user-123",
+            "status": Status.NEW,
+        }
+        defaults.update(kwargs)
+        return Ticket.objects.create_with_number(**defaults)
+
+    def _create_view(self, filters: dict) -> TicketView:
+        return TicketView.objects.create(team=self.team, name="Saved view", filters=filters, created_by=self.user)
+
+    def _list_ids(self, **params) -> set[str]:
+        response = self.client.get(f"/api/projects/{self.team.id}/conversations/tickets/", data=params)
+        assert response.status_code == status.HTTP_200_OK, response.json()
+        return {r["id"] for r in response.json()["results"]}
+
+    def test_view_param_matches_equivalent_flat_params(self):
+        open_high = self._create_ticket(status=Status.OPEN, priority=Priority.HIGH)
+        self._create_ticket(status=Status.OPEN, priority=Priority.LOW)
+        self._create_ticket(status=Status.RESOLVED, priority=Priority.HIGH)
+        view = self._create_view({"status": ["open"], "priority": ["high"]})
+
+        via_view = self._list_ids(view=view.short_id)
+        via_params = self._list_ids(status="open", priority="high")
+        assert via_view == via_params == {str(open_high.id)}
+
+    def test_explicit_param_overrides_view_filter(self):
+        self._create_ticket(status=Status.OPEN)
+        resolved = self._create_ticket(status=Status.RESOLVED)
+        view = self._create_view({"status": ["open"]})
+
+        assert self._list_ids(view=view.short_id, status="resolved") == {str(resolved.id)}
+
+    def test_unknown_view_short_id_returns_400(self):
+        response = self.client.get(f"/api/projects/{self.team.id}/conversations/tickets/", data={"view": "nonexistent"})
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_other_teams_view_returns_400(self):
+        other_team = Team.objects.create(organization=self.organization, name="Team 2")
+        other_view = TicketView.objects.create(
+            team=other_team, name="Other", filters={"status": ["open"]}, created_by=self.user
+        )
+
+        response = self.client.get(
+            f"/api/projects/{self.team.id}/conversations/tickets/", data={"view": other_view.short_id}
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_view_assignee_me_resolves_to_requesting_user(self):
+        mine = self._create_ticket()
+        TicketAssignment.objects.create(ticket=mine, user=self.user)
+        other_user = User.objects.create_and_join(self.organization, "other@posthog.com", None)
+        theirs = self._create_ticket()
+        TicketAssignment.objects.create(ticket=theirs, user=other_user)
+        self._create_ticket()  # unassigned
+        view = self._create_view({"assignee": ["me"]})
+
+        assert self._list_ids(view=view.short_id) == {str(mine.id)}
+
+    def test_legacy_view_filters_blob_applies_without_error(self):
+        # Old saved views carry 'all' sentinels, a single-value assignee, and keys the
+        # backend never validated. Applying one must filter nothing and respect sorting.
+        first = self._create_ticket()
+        second = self._create_ticket()
+        view = self._create_view(
+            {
+                "channel": "all",
+                "sla": "all",
+                "assignee": "all",
+                "search": "",
+                "futureKey": True,
+                "sorting": {"columnKey": "created_at", "order": 1},
+            }
+        )
+
+        response = self.client.get(f"/api/projects/{self.team.id}/conversations/tickets/", data={"view": view.short_id})
+        assert response.status_code == status.HTTP_200_OK
+        assert [r["id"] for r in response.json()["results"]] == [str(first.id), str(second.id)]
