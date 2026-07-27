@@ -726,6 +726,20 @@ class TestValidateCredentials:
         assert is_valid is False
         assert message is not None and "professional Instagram account" in message
 
+    @pytest.mark.parametrize("account_id", ["17841/../me", "me?fields=id", "17841 or 1", "abc"])
+    def test_a_non_numeric_account_id_is_rejected_before_any_request(self, account_id: str) -> None:
+        # The account ID is spliced into the Graph path, so a non-numeric value could
+        # retarget the request or inject path/query segments.
+        session = FakeSession()
+        with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
+            is_valid, message = validate_credentials(
+                "tok", "instagram", "v23.0", LOGGER, instagram_account_id=account_id
+            )
+
+        assert is_valid is False
+        assert message is not None and "must be numeric" in message
+        assert session.requested_urls == []
+
 
 class TestInstagramSourceResponse:
     @pytest.mark.parametrize("endpoint", list(INSTAGRAM_ENDPOINTS))

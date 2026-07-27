@@ -57,6 +57,13 @@ class InstagramSource(ResumableSource[InstagramSourceConfig, InstagramResumeConf
     lists_tables_without_credentials = True
 
     @property
+    def connection_host_fields(self) -> list[str]:
+        # Both decide where the stored token is sent: `login_type` picks the Graph host and
+        # `instagram_account_id` is spliced into the request path. Changing either while
+        # reusing a preserved token could retarget it, so both force credential re-entry.
+        return ["login_type", "instagram_account_id"]
+
+    @property
     def source_type(self) -> ExternalDataSourceType:
         return ExternalDataSourceType.INSTAGRAM
 

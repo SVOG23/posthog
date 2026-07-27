@@ -61,6 +61,11 @@ class TestInstagramSource:
     def test_source_type(self) -> None:
         assert self.source.source_type == ExternalDataSourceType.INSTAGRAM
 
+    def test_retargeting_fields_force_credential_reentry(self) -> None:
+        # Both determine where the stored token is sent, so changing either must not silently
+        # reuse the preserved credential.
+        assert self.source.connection_host_fields == ["login_type", "instagram_account_id"]
+
     def test_the_source_ships_visible_and_documented(self) -> None:
         config = self.source.get_source_config
 

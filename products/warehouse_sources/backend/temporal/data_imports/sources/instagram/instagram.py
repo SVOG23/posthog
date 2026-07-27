@@ -1,3 +1,4 @@
+import re
 import hmac
 import hashlib
 import dataclasses
@@ -30,6 +31,10 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.
 
 REQUEST_TIMEOUT_SECONDS = 60
 MAX_RETRY_ATTEMPTS = 5
+
+# Instagram account node IDs are plain integers. Anything else spliced into the Graph path
+# risks retargeting the request at a different object or injecting path/query segments.
+_NUMERIC_ACCOUNT_ID = re.compile(r"^[0-9]+$")
 
 # The media edge tops out at 10K posts; at PAGE_SIZE per page that is 100 pages. The cap
 # is a runaway guard for a paginator that never signals the end, not a real limit.
@@ -594,6 +599,13 @@ def validate_credentials(
         return False, (
             "Enter the Instagram account ID. A Facebook Login token is scoped to a person, "
             "so it can't resolve the account on its own."
+        )
+    # The account ID is spliced straight into the Graph API path, so anything but the plain
+    # numeric node ID could select a different object or inject extra path/query segments.
+    if account_id and not _NUMERIC_ACCOUNT_ID.match(account_id):
+        return (
+            False,
+            "The Instagram account ID must be numeric — copy it exactly from your account (e.g. 17841400000000000).",
         )
 
     try:
