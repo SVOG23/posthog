@@ -5251,9 +5251,9 @@ snapshots:
     scenes-app-ai-observability-trace--full--light:
         hash: v1.k794b7964.ccfd240291b68c038036220ca359b4987c4ac7323a1e000037cc4ca5b82d8ec9.i9mrpnbsbZ1684VkG-73iX07RcINQT0AeFz9Dpcb9dA
     scenes-app-ai-observability-trace--full-specific-event--dark:
-        hash: v1.k794b7964.9e2b03887812835f8023784604140d29f446039730a7dc25b79e36cde1ed1b6d.QHqBYIGjK-VR1vwG9_SzRgH3BeHv6k00HcHn9RAnM10
+        hash: v1.k794b7964.c9cbe6aebc1ecdb9e48ff4637b522d40f322883b815c5a51436b352daa78a4c8.IZcK8jXK1KLxCaC1P5SbO-Pbbk0ekl5bBlXoZY5m8Lw
     scenes-app-ai-observability-trace--full-specific-event--light:
-        hash: v1.k794b7964.20c4c76745d353d2ad3ef1bd0b9804fb219f8e2f609e892e2cfdc5bf8718a235.4i9VZL_CH7pQefsi18fQOQtJh1f0jnk12bZBlZSSoCM
+        hash: v1.k794b7964.1e43fe775436b4a7d6535802bad4a4375471c3bb904858fb3b8a18f4fa95b750.HweK-L7bPr15r6X5IUUd4XlpRxMkxPEK9tgyvfH0QaU
     scenes-app-ai-observability-trace--without-content--dark:
         hash: v1.k794b7964.43c0a5235771b6bdb554e89d09b43f6aa3603ed7ebe2e0d84858e0d2c15eb278.yNl0wPG__RV5KWRQSSk1AAiPFcFBXftZFMuYZ9uXZeY
     scenes-app-ai-observability-trace--without-content--light:
