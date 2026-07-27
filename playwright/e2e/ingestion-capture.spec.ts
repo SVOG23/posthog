@@ -38,12 +38,19 @@ test.describe('Event ingestion', () => {
                         const resp = await request.post(`/api/environments/${workspace.team_id}/query/`, {
                             headers: authHeaders,
                             data: {
+                                // Without this the endpoint serves a cached result for up to 5 minutes,
+                                // so the first poll's zero would be replayed for the rest of the window.
+                                refresh: 'force_blocking',
                                 query: {
                                     kind: 'HogQLQuery',
                                     query: `SELECT count() FROM events WHERE event = '${eventName}'`,
                                 },
                             },
                         })
+                        // A 4xx other than rate limiting means the query itself is bad — waiting won't fix it.
+                        if (resp.status() >= 400 && resp.status() < 500 && resp.status() !== 429) {
+                            throw new Error(`query endpoint returned ${resp.status()}: ${await resp.text()}`)
+                        }
                         const body = await resp.json()
                         return Number(body.results?.[0]?.[0] ?? 0)
                     },

@@ -61,14 +61,18 @@ test.describe('Invites', () => {
             await invitePage.locator('[data-attr=signup-role-at-organization]').click()
             await invitePage.locator('.Popover__content').getByText('Engineering').click()
             await invitePage.locator('[data-attr=password-signup]').click()
-            await invitePage.waitForURL(/\/project\//, { timeout: 30000 })
-
-            const me = await invitePage.request.get('/api/users/@me/')
-            expect(me.status()).toBe(200)
-            const body = await me.json()
-            expect(body.email).toBe(inviteeEmail)
-            expect(body.organization.id).toBe(workspace.organization_id)
+            // Where signup lands depends on whether the server has an email backend configured:
+            // with one, it routes to email verification instead of logging the invitee straight in.
+            await invitePage.waitForURL(/\/(project|verify_email)\//, { timeout: 30000 })
             await context.close()
+
+            // Membership is created when the invite is used, before that branch, so it holds either way.
+            const members = await page.request.get(`/api/organizations/${workspace.organization_id}/members/`)
+            expect(members.status()).toBe(200)
+            const emails = (await members.json()).results.map(
+                (member: { user: { email: string } }) => member.user.email
+            )
+            expect(emails).toContain(inviteeEmail)
         })
     })
 })
