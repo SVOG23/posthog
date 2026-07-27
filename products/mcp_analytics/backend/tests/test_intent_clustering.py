@@ -30,6 +30,7 @@ from products.mcp_analytics.backend.intent_clustering import (
     MAX_INTENT_TEXT_LENGTH,
     NO_INTENT_RECORDED_FALLBACK,
     IntentRecord,
+    RecurringIntent,
     _content_hash,
     _decode_embedding,
     _encode_embedding,
@@ -39,6 +40,7 @@ from products.mcp_analytics.backend.intent_clustering import (
     cluster_embeddings,
     embed_intents_async,
     fetch_intent_corpus,
+    fetch_recurring_intents,
     fetch_session_journeys,
 )
 from products.mcp_analytics.backend.models import MCPIntentEmbeddingCache, MCPSession
@@ -198,10 +200,79 @@ class TestBuildSnapshot:
         labels = np.array([0, 1], dtype=np.int64)
         embeddings = np.array([_unit([1.0, 0.0]), _unit([0.0, 1.0])], dtype=np.float32)
 
-        snapshot = build_snapshot(records, labels, embeddings)
+        snapshot = build_snapshot(records, labels, embeddings, min_cluster_intents=1)
 
         assert snapshot["clusters"][0]["label"] == "popular intent"
         assert snapshot["clusters"][1]["label"] == "rare intent"
+
+    def test_singleton_clusters_collapse_into_long_tail(self) -> None:
+        records = [
+            IntentRecord(
+                intent_text="check flag rollout",
+                frequency=8,
+                session_count=2,
+                tool_counts={"feature_flag_get": 8},
+            ),
+            IntentRecord(
+                intent_text="look up flag status",
+                frequency=4,
+                session_count=1,
+                tool_counts={"feature_flag_get": 4},
+            ),
+            IntentRecord(
+                intent_text="one-off question",
+                frequency=3,
+                session_count=1,
+                tool_counts={"query_run": 3},
+                error_counts={"query_run": 1},
+            ),
+        ]
+        labels = np.array([0, 0, 1], dtype=np.int64)
+        embeddings = np.array([_unit([1.0, 0.1]), _unit([1.0, 0.0]), _unit([0.0, 1.0])], dtype=np.float32)
+
+        snapshot = build_snapshot(records, labels, embeddings)
+
+        assert [c["label"] for c in snapshot["clusters"]] == ["check flag rollout"]
+        long_tail = snapshot["long_tail"]
+        assert long_tail["intent_count"] == 1
+        assert long_tail["session_count"] == 1
+        assert long_tail["call_count"] == 3
+        assert long_tail["error_count"] == 1
+        assert long_tail["error_rate_pct"] == pytest.approx(33.3, abs=0.1)
+        assert long_tail["sample_intents"] == ["one-off question"]
+        assert snapshot["computed_with"]["n_clusters"] == 1
+        assert snapshot["computed_with"]["n_long_tail_intents"] == 1
+
+    def test_no_long_tail_when_all_clusters_meet_min_size(self) -> None:
+        records = [
+            IntentRecord(intent_text="a", frequency=2, session_count=1, tool_counts={"tool_a": 2}),
+            IntentRecord(intent_text="b", frequency=1, session_count=1, tool_counts={"tool_a": 1}),
+        ]
+        labels = np.array([0, 0], dtype=np.int64)
+        embeddings = np.array([_unit([1.0, 0.1]), _unit([1.0, 0.0])], dtype=np.float32)
+
+        snapshot = build_snapshot(records, labels, embeddings)
+
+        assert snapshot["long_tail"] is None
+
+    def test_recurring_entries_are_embedded_in_blob(self) -> None:
+        recurring = [
+            RecurringIntent(intent_text="daily demo check", session_count=61, call_count=610, error_count=300),
+        ]
+
+        snapshot = build_snapshot(
+            [], np.array([], dtype=np.int64), np.zeros((0, 4), dtype=np.float32), recurring=recurring
+        )
+
+        assert snapshot["recurring"] == [
+            {
+                "intent_text": "daily demo check",
+                "session_count": 61,
+                "call_count": 610,
+                "error_count": 300,
+                "error_rate_pct": 49.2,
+            }
+        ]
 
     def test_sample_intents_capped_and_sorted_by_frequency(self) -> None:
         records = [
@@ -347,6 +418,17 @@ class TestFetchIntentCorpus(_MCPAnalyticsTeamScopedTestMixin, ClickhouseTestMixi
 
         assert [r.intent_text for r in records] == expected_intents
 
+    def test_exclude_texts_drops_matching_sessions_from_corpus(self) -> None:
+        self._seed_tool_call("cron-1", "execute-sql", intent="recurring bot intent")
+        self._seed_tool_call("cron-2", "execute-sql", intent="recurring bot intent")
+        self._seed_tool_call("human-1", "query-trends", intent="unique human question")
+        flush_persons_and_events()
+
+        records, intent_by_session = fetch_intent_corpus(self.team, exclude_texts={"recurring bot intent"})
+
+        assert {r.intent_text for r in records} == {"unique human question"}
+        assert set(intent_by_session) == {"human-1"}
+
     def test_builds_corpus_from_event_intents_without_session_rows(self) -> None:
         # Two intents in one session: the chronologically first one represents it.
         self._seed_tool_call(
@@ -455,6 +537,65 @@ class TestFetchIntentCorpus(_MCPAnalyticsTeamScopedTestMixin, ClickhouseTestMixi
 
         journeys = fetch_session_journeys(self.team, list(intent_by_session.keys()))
         assert len(journeys) == n_sessions
+
+
+# fetch_recurring_intents --------------------------------------------------
+
+
+class TestFetchRecurringIntents(_MCPAnalyticsTeamScopedTestMixin, ClickhouseTestMixin, BaseTest):
+    def _seed_tool_call(
+        self,
+        session_id: str,
+        tool_name: str,
+        is_error: bool = False,
+        intent: str | None = None,
+    ) -> None:
+        properties: dict[str, Any] = {
+            "$session_id": session_id,
+            "$mcp_tool_name": tool_name,
+            "$mcp_is_error": is_error,
+        }
+        if intent is not None:
+            properties["$mcp_intent"] = intent
+        _create_event(
+            event_uuid=uuid.uuid4(),
+            event="$mcp_tool_call",
+            team=self.team,
+            distinct_id="seed",
+            timestamp=datetime.now(tz=UTC) - timedelta(hours=1),
+            properties=properties,
+        )
+
+    def test_repeated_first_intent_aggregates_sessions_calls_and_errors(self) -> None:
+        # Three cron sessions opening with the same intent; later calls in the
+        # session carry no intent but must still count toward call volume.
+        for i in range(3):
+            self._seed_tool_call(f"cron-{i}", "execute-sql", intent="daily demo check", is_error=(i == 0))
+            self._seed_tool_call(f"cron-{i}", "read-data-schema")
+        self._seed_tool_call("human-1", "query-trends", intent="one-off question")
+        flush_persons_and_events()
+
+        out = fetch_recurring_intents(self.team, min_sessions=3)
+
+        assert [r.intent_text for r in out] == ["daily demo check"]
+        assert out[0].session_count == 3
+        assert out[0].call_count == 6
+        assert out[0].error_count == 1
+
+    @parameterized.expand(
+        [
+            ("below_threshold_excluded", 3, []),
+            ("at_threshold_included", 2, ["twice repeated"]),
+        ]
+    )
+    def test_min_sessions_threshold(self, _name: str, min_sessions: int, expected: list[str]) -> None:
+        for i in range(2):
+            self._seed_tool_call(f"s-{i}", "execute-sql", intent="twice repeated")
+        flush_persons_and_events()
+
+        out = fetch_recurring_intents(self.team, min_sessions=min_sessions)
+
+        assert [r.intent_text for r in out] == expected
 
 
 # Embedding helpers -----------------------------------------------------
