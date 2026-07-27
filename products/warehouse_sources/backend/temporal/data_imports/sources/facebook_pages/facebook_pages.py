@@ -492,7 +492,10 @@ def get_rows(
     config = FACEBOOK_PAGES_ENDPOINTS[endpoint]
     last_value = db_incremental_field_last_value if should_use_incremental_field else None
 
-    session = make_tracked_session(redact_values=(access_token, app_secret))
+    # capture=False: Graph responses carry arbitrary Page content (post text, stories,
+    # descriptions) the name-based sample scrubber can't recognise, so keep them out of the
+    # shared HTTP sample bucket. Requests stay metered and logged.
+    session = make_tracked_session(redact_values=(access_token, app_secret), capture=False)
     token = resolve_page_access_token(session, api_version, app_id, app_secret, page_id, access_token, logger)
 
     if config.style == "object":
@@ -525,7 +528,9 @@ def validate_credentials(
         return False, "Enter the numeric ID of the Facebook Page you want to sync"
 
     logger = PROBE_LOGGER
-    session = make_tracked_session(redact_values=(access_token, app_secret))
+    # capture=False for the same reason as the sync path: the probe reads Page fields whose
+    # values the scrubber can't recognise. See get_rows.
+    session = make_tracked_session(redact_values=(access_token, app_secret), capture=False)
 
     try:
         token = resolve_page_access_token(session, api_version, app_id, app_secret, page_id, access_token, logger)

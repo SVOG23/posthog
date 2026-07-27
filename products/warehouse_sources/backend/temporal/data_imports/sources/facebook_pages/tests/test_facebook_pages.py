@@ -163,6 +163,48 @@ class TestRequestSigning:
         assert query["appsecret_proof"] == appsecret_proof(APP_SECRET, PAGE_TOKEN)
 
 
+class TestSampleCaptureDisabled:
+    """Graph responses carry arbitrary Page content the scrubber can't recognise, so the
+    tracked sessions must be built with capture=False on both the sync and probe paths."""
+
+    def test_sync_path_disables_sample_capture(self) -> None:
+        session = _FakeSession([_response(json_data={"data": [], "paging": {}})])
+        with (
+            mock.patch(f"{MODULE}.make_tracked_session", return_value=session) as make_session,
+            mock.patch(f"{MODULE}.resolve_page_access_token", return_value=PAGE_TOKEN),
+        ):
+            list(
+                get_rows(
+                    page_id=PAGE_ID,
+                    access_token=USER_TOKEN,
+                    app_id=APP_ID,
+                    app_secret=APP_SECRET,
+                    endpoint="posts",
+                    api_version=API_VERSION,
+                    logger=mock.MagicMock(),
+                    resumable_source_manager=_FakeManager(),
+                )
+            )
+
+        assert make_session.call_args.kwargs["capture"] is False
+
+    def test_probe_path_disables_sample_capture(self) -> None:
+        session = _FakeSession([_response(json_data={"id": PAGE_ID, "name": "PostHog"})])
+        with (
+            mock.patch(f"{MODULE}.make_tracked_session", return_value=session) as make_session,
+            mock.patch(f"{MODULE}.resolve_page_access_token", return_value=PAGE_TOKEN),
+        ):
+            validate_credentials(
+                page_id=PAGE_ID,
+                access_token=USER_TOKEN,
+                app_id=APP_ID,
+                app_secret=APP_SECRET,
+                api_version=API_VERSION,
+            )
+
+        assert make_session.call_args.kwargs["capture"] is False
+
+
 class TestErrorClassification:
     @pytest.mark.parametrize(
         "status_code, code, expected",
