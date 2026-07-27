@@ -33,7 +33,9 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.settings import (
     ACCOUNT_INSIGHT_METRICS,
+    ACCOUNT_INSIGHTS_WINDOW_DAYS,
     INSTAGRAM_ENDPOINTS,
+    MAX_INSIGHTS_LOOKBACK_DAYS,
     MEDIA_INSIGHT_METRICS,
 )
 
@@ -160,6 +162,14 @@ class TestInstagramTransport:
 
         assert client.appsecret_proof() is None
         assert "appsecret_proof" not in client.build_url("me")
+
+    def test_graph_responses_are_kept_out_of_the_http_sample_bucket(self) -> None:
+        # Graph API bodies carry user-authored content (bios, captions, comments) the
+        # generic scrubbers can't redact, so the session must opt out of sample capture.
+        with mock.patch(f"{MODULE}.make_tracked_session", return_value=FakeSession()) as factory:
+            InstagramClient("tok", "instagram", "v23.0", LOGGER)
+
+        assert factory.call_args.kwargs["capture"] is False
 
     @pytest.mark.parametrize(
         "url,expected",
@@ -661,6 +671,17 @@ class TestInstagramAccountInsights:
 
         assert session.requested_urls
         assert "metric=reach" in session.requested_urls[0]
+
+    def test_an_ancient_start_date_is_clamped_to_the_retention_horizon(self) -> None:
+        # Without the clamp a start date like this fans out into tens of thousands of
+        # empty 30-day windows; Meta only retains ~2 years anyway.
+        session = FakeSession()
+
+        _collect("account_insights", session, start_date="0001-01-01")
+
+        windows = [url for url in session.requested_urls if "metric=reach" in url]
+        max_windows = MAX_INSIGHTS_LOOKBACK_DAYS // ACCOUNT_INSIGHTS_WINDOW_DAYS + 1
+        assert 0 < len(windows) <= max_windows
 
 
 class TestValidateCredentials:

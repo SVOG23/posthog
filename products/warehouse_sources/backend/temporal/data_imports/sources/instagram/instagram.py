@@ -21,6 +21,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.
     DEFAULT_MEDIA_INSIGHT_METRICS,
     INSTAGRAM_ENDPOINTS,
     INSTAGRAM_HOSTS,
+    MAX_INSIGHTS_LOOKBACK_DAYS,
     MEDIA_INSIGHT_METRICS,
     MEDIA_PARENT_FIELDS,
     PAGE_SIZE,
@@ -173,6 +174,10 @@ class InstagramClient:
             headers={"Accept": "application/json"},
             retry=Retry(total=0),
             redact_values=tuple(value for value in (access_token, self._app_secret) if value),
+            # Graph API responses carry user-authored content — bios, captions, comments,
+            # usernames — that the name-based scrubbers can't recognise, so keep these
+            # bodies out of the shared HTTP sample bucket while still metering the calls.
+            capture=False,
         )
 
     def appsecret_proof(self) -> Optional[str]:
@@ -495,11 +500,15 @@ def _account_insight_rows(
     logger: FilteringBoundLogger,
     since: Optional[int],
 ) -> Iterator[list[dict[str, Any]]]:
-    until = int(datetime.now(UTC).timestamp())
+    now = datetime.now(UTC)
+    until = int(now.timestamp())
+    # Clamp the (user-controlled) start date to Meta's retention horizon: a date like
+    # `0001-01-01` would otherwise fan out into tens of thousands of empty 30-day windows.
+    earliest = int((now - timedelta(days=MAX_INSIGHTS_LOOKBACK_DAYS)).timestamp())
     start = (
-        since
+        max(since, earliest)
         if since is not None
-        else int((datetime.now(UTC) - timedelta(days=DEFAULT_INSIGHTS_LOOKBACK_DAYS)).timestamp())
+        else int((now - timedelta(days=DEFAULT_INSIGHTS_LOOKBACK_DAYS)).timestamp())
     )
 
     plan = _account_insight_plan(client, instagram_account_id, start, until)

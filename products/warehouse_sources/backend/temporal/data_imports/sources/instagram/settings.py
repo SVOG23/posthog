@@ -36,6 +36,10 @@ ACCOUNT_INSIGHTS_WINDOW_DAYS = 30
 # retains ~2 years of insights, but a fresh connection defaulting to two years of
 # 30-day windows is a lot of calls for data most people don't want.
 DEFAULT_INSIGHTS_LOOKBACK_DAYS = 90
+# Hard floor on how far back a user-supplied start date can push the account-insights
+# backfill. Meta only retains ~2 years of insights anyway, so a start date older than
+# this returns nothing but would still fan out into thousands of empty 30-day windows.
+MAX_INSIGHTS_LOOKBACK_DAYS = 365 * 2
 
 # Account-level metrics pulled as a daily time series. Meta churns this list per Graph
 # version (`impressions` was retired in v22.0 in favour of `views`), so each metric is
