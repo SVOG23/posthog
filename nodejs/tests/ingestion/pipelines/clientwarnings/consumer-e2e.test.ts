@@ -4,6 +4,7 @@ import { KafkaProducerRegistryComponent } from '~/ingestion/common/outputs/produ
 import {
     getDefaultKafkaDownstreamProducerEnvConfig,
     getDefaultKafkaUpstreamProducerEnvConfig,
+    getDefaultKafkaWarpstreamSharedProducerEnvConfig,
 } from '~/ingestion/common/outputs/producers'
 import { Component, newScope } from '~/ingestion/common/scopes'
 import { getDefaultIngestionOutputsConfig } from '~/ingestion/config'
@@ -96,6 +97,7 @@ describe('ClientWarnings consumer E2E', () => {
         const registryConfig = {
             ...getDefaultKafkaUpstreamProducerEnvConfig(),
             ...getDefaultKafkaDownstreamProducerEnvConfig(),
+            ...getDefaultKafkaWarpstreamSharedProducerEnvConfig(),
         }
         const sharedScope: ClientWarningsSharedScope = newScope('clientwarnings-e2e-shared', (b) =>
             b
