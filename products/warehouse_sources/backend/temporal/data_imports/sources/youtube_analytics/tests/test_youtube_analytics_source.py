@@ -163,6 +163,7 @@ class TestYouTubeAnalyticsSource:
             client_secret="client-secret",
             refresh_token="refresh-token",
             channel_id="UC123",
+            start_date=None,
             api_version="v2",
         )
 

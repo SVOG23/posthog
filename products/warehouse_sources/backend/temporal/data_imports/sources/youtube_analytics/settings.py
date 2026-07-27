@@ -25,6 +25,11 @@ DAY_DIMENSION_WINDOW_DAYS = 90
 # First sync horizon when the user doesn't pin a start date.
 DEFAULT_LOOKBACK_DAYS = 365
 
+# Earliest start date we accept. YouTube Analytics has no channel data before 2008, and each
+# report walks the range one day (or one 90-day window) at a time, so a date further back just
+# fans out empty requests — bound it to keep a stray start date from spawning a runaway backfill.
+MIN_START_DATE = "2008-01-01"
+
 CHANNEL_DAILY = "channel_daily"
 TOP_VIDEOS = "top_videos"
 TRAFFIC_SOURCES = "traffic_sources"

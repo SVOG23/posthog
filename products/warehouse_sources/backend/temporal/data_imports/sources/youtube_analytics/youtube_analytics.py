@@ -17,6 +17,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.youtube_an
     DEFAULT_LOOKBACK_DAYS,
     GOOGLE_TOKEN_URL,
     MAX_RESULTS_PER_PAGE,
+    MIN_START_DATE,
     YOUTUBE_ANALYTICS_HOST,
     YOUTUBE_ANALYTICS_REPORTS,
     YouTubeAnalyticsReportConfig,
@@ -138,13 +139,37 @@ class YouTubeAnalyticsClient:
         return response.json()
 
 
+def min_start_day() -> date:
+    return datetime.strptime(MIN_START_DATE, "%Y-%m-%d").date()
+
+
+def validate_start_date(start_date: str | None) -> tuple[bool, Optional[str]]:
+    """Reject a pinned start date that predates YouTube Analytics data or sits in the future — an
+    unbounded historical range fans out into one request per day per report."""
+    if not start_date:
+        return True, None
+    parsed = coerce_day(start_date)
+    if parsed is None:
+        return False, f"Invalid start date '{start_date}'. Use the format YYYY-MM-DD."
+    if parsed.date() < min_start_day():
+        return False, f"Start date must be on or after {MIN_START_DATE}."
+    if parsed.date() > datetime.now(UTC).date():
+        return False, "Start date can't be in the future."
+    return True, None
+
+
 def validate_credentials(
     client_id: str,
     client_secret: str,
     refresh_token: str,
     channel_id: str | None = None,
+    start_date: str | None = None,
     api_version: str = DEFAULT_API_VERSION,
 ) -> tuple[bool, Optional[str]]:
+    ok, message = validate_start_date(start_date)
+    if not ok:
+        return False, message
+
     client = YouTubeAnalyticsClient(client_id, client_secret, refresh_token, api_version=api_version)
     try:
         client.mint_token()
@@ -190,7 +215,12 @@ def resolve_start_day(
     """Earliest day to request: the stored watermark when syncing incrementally, else the
     user's pinned start date, else a bounded first-sync horizon."""
     configured = coerce_day(start_date)
-    floor = configured.date() if configured else today - timedelta(days=DEFAULT_LOOKBACK_DAYS)
+    # Clamp to the supported floor so a start date saved before that guard existed still can't
+    # walk the range back before YouTube has data.
+    floor = max(
+        configured.date() if configured else today - timedelta(days=DEFAULT_LOOKBACK_DAYS),
+        min_start_day(),
+    )
 
     if should_use_incremental_field:
         watermark = coerce_day(db_incremental_field_last_value)

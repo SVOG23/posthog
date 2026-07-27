@@ -113,6 +113,7 @@ class YouTubeAnalyticsSource(ResumableSource[YouTubeAnalyticsSourceConfig, YouTu
             client_secret=config.client_secret,
             refresh_token=config.refresh_token,
             channel_id=config.channel_id,
+            start_date=config.start_date,
             api_version=self.resolve_api_version(api_version),
         )
 

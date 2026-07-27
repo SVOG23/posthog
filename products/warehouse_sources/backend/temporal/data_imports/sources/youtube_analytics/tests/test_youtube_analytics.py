@@ -231,6 +231,7 @@ class TestResolveStartDay:
             ("watermark_before_floor_is_clamped", "2026-06-01", True, "2026-01-15", date(2026, 6, 1)),
             ("watermark_ignored_on_full_refresh", "2026-01-15", False, "2026-06-01", date(2026, 1, 15)),
             ("unparseable_watermark_falls_back", "2026-01-15", True, "garbage", date(2026, 1, 15)),
+            ("start_before_floor_is_clamped", "2000-01-01", False, None, date(2008, 1, 1)),
         ]
     )
     def test_resolves_first_day(
@@ -400,6 +401,22 @@ class TestValidateCredentials:
 
         assert is_valid is False
         assert message is not None and "Could not reach" in message
+
+    @parameterized.expand(
+        [
+            ("before_floor", "2000-01-01", "on or after 2008-01-01"),
+            ("in_the_future", "2027-01-01", "can't be in the future"),
+            ("unparseable", "not-a-date", "Invalid start date"),
+        ]
+    )
+    def test_out_of_range_start_date_is_rejected_before_any_request(
+        self, _name: str, start_date: str, fragment: str
+    ) -> None:
+        # A bad start date is caught before the token exchange, so no client is constructed.
+        is_valid, message = validate_credentials("id", "secret", "refresh", start_date=start_date)
+
+        assert is_valid is False
+        assert message is not None and fragment in message
 
 
 class TestYouTubeAnalyticsSourceResponse:
