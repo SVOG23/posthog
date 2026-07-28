@@ -34,7 +34,7 @@ const GITHUB_REF_NAME = process.env.GITHUB_REF_NAME || 'master'
 const TOP_N = 10
 const CANDIDATE_POOL = 40
 const CLUSTER_MIN_TESTS = 5
-const REPORT_RUNNER = 'pytest'
+const REPORT_RUNNERS = ['pytest']
 
 const RETRY_ATTEMPTS = 3
 const RETRY_DELAY_MS = 30_000
@@ -86,17 +86,17 @@ function endpointUrl(action, params = {}) {
 
 const AUTH_HEADERS = { Authorization: `Bearer ${API_KEY}` }
 
-function flakyTestsUrl() {
+function flakyTestsUrl(runner) {
     return endpointUrl('flaky_tests', {
         date_from: '-7d',
         limit: 100,
         repo: GITHUB_REPOSITORY,
-        runner: REPORT_RUNNER,
+        runner,
     })
 }
 
-function fetchFlakyTests() {
-    return withRetry(() => request(flakyTestsUrl(), { headers: AUTH_HEADERS }, 'flaky_tests'))
+function fetchFlakyTests(runner) {
+    return withRetry(() => request(flakyTestsUrl(runner), { headers: AUTH_HEADERS }, 'flaky_tests'))
 }
 
 // `values` bind through HogQL's {placeholder} syntax, escaped server-side — never
@@ -126,9 +126,18 @@ function isMasterBurst(item) {
     )
 }
 
-function selectReportCandidates(items) {
+function selectReportCandidates(items, runner) {
     return collapseClusters(
-        items.filter((item) => item.runner === REPORT_RUNNER && !isMasterBurst(item)).slice(0, CANDIDATE_POOL)
+        items.filter((item) => item.runner === runner && !isMasterBurst(item)).slice(0, CANDIDATE_POOL)
+    )
+}
+
+async function fetchCandidatePools(runners, fetchTests = fetchFlakyTests) {
+    return Promise.all(
+        runners.map(async (runner) => {
+            const result = await fetchTests(runner)
+            return { runner, candidates: selectReportCandidates(result.items || [], runner) }
+        })
     )
 }
 
@@ -393,8 +402,7 @@ async function main() {
         return
     }
     const now = new Date()
-    const result = await fetchFlakyTests()
-    const pool = selectReportCandidates(result.items || [])
+    const [{ candidates: pool }] = await fetchCandidatePools(REPORT_RUNNERS)
     const extrasFor = await enrich(pool.filter((item) => !item.cluster_size))
     // Rescued runs first (the strongest per-test signal), clusters and the rest by volume.
     const flaky = pool
@@ -428,4 +436,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     })
 }
 
-export { buildBlocks, enrich, flakyTestsUrl, selectReportCandidates, tableRows }
+export { buildBlocks, enrich, fetchCandidatePools, flakyTestsUrl, REPORT_RUNNERS, selectReportCandidates, tableRows }
