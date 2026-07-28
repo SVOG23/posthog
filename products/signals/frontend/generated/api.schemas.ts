@@ -1773,6 +1773,15 @@ export interface SignalScoutConfigApi {
      * @nullable
      */
     readonly last_run_at: string | null
+    /**
+     * When this scout was paused automatically after failing repeatedly. Null means it is running normally. A paused scout is skipped on its schedule apart from one retry a day; a successful run clears the pause, and so does editing the config or running the scout manually. See `auto_pause_reason` for what went wrong.
+     * @nullable
+     */
+    readonly auto_paused_at: string | null
+    /** Error from the run that caused the pause. Empty unless `auto_paused_at` is set. */
+    readonly auto_pause_reason: string
+    /** How many of this scout's runs have failed in a row. Back to 0 after a successful run. The scout pauses itself once this reaches the failure limit. */
+    readonly consecutive_failure_count: number
     readonly created_at: string
 }
 
