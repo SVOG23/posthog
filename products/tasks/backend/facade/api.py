@@ -1811,6 +1811,12 @@ _PROTECTED_RUN_STATE_KEYS = frozenset(
         "loop_trigger_id",
         "trigger_context",
         "config_snapshot",
+        # Stage provenance stamped once at run creation (create_and_run's extra_state).
+        # ai_stage="implementation" is what identifies a self-driving implementation run to the
+        # review carve-outs (find_signal_implementation_run, review_hog's inbox trigger); a
+        # PATCHable value would let any task controller forge implementation provenance onto a
+        # run and route an App-bot PR into the approve-first bot/draft/mode/permission bypass.
+        "ai_stage",
     }
 )
 
