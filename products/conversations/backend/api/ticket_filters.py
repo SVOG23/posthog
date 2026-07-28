@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from django.db.models import CharField, Exists, OuterRef, Q, QuerySet
+from django.db.models import CharField, Exists, F, OrderBy, OuterRef, Q, QuerySet
 from django.db.models.functions import Cast
 from django.utils import timezone
 
@@ -304,6 +304,26 @@ def _sorting_to_order_by(sorting: Mapping[str, Any] | None) -> str:
     return column if sorting.get("order") == 1 else f"-{column}"
 
 
+def _sorting_to_order_expressions(sorting: Mapping[str, Any] | None) -> tuple[OrderBy | str, str]:
+    order_by = _sorting_to_order_by(sorting)
+    field_name = order_by.lstrip("-")
+    primary: OrderBy | str
+    if field_name in ("sla_due_at", "snoozed_until"):
+        # A ticket with no SLA (or no snooze) sorts to the bottom either direction — an
+        # absent deadline isn't more urgent than a real one, and it keeps the large NULL
+        # block off the first pages so the SLA-sorted rows are what the user actually sees.
+        descending = order_by.startswith("-")
+        primary = F(field_name).desc(nulls_last=True) if descending else F(field_name).asc(nulls_last=True)
+    else:
+        primary = order_by
+
+    # ticket_number is unique per team (the queryset is already team-scoped), so it breaks
+    # ties deterministically. Without it, rows equal on the primary key — every no-SLA
+    # ticket shares NULL sla_due_at — have no stable order across the separate LIMIT/OFFSET
+    # page queries, so pages overlap or drop rows and the sort looks lost past page 1.
+    return primary, "-ticket_number"
+
+
 def _assignee_filter_q(entries: list[Any], user: User | None) -> Q:
     user_ids: list[int] = []
     role_ids: list[uuid.UUID] = []
@@ -442,4 +462,4 @@ def apply_ticket_filters(queryset: QuerySet, filters: Mapping[str, Any], *, team
     if search and len(search) <= MAX_SEARCH_LENGTH:
         queryset = _apply_search(queryset, search)
 
-    return queryset.order_by(_sorting_to_order_by(filters.get("sorting")))
+    return queryset.order_by(*_sorting_to_order_expressions(filters.get("sorting")))

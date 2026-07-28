@@ -70,7 +70,7 @@ const conversationsTicketsList = (): ToolBase<
                 ])
             ),
         } as typeof result
-        return await withPostHogUrl(context, filtered, '/conversations/tickets')
+        return await withPostHogUrl(context, filtered, '/support/tickets')
     },
 })
 
@@ -167,7 +167,7 @@ const conversationsTicketsRetrieve = (): ToolBase<
             'created_at',
             'updated_at',
         ]) as typeof result
-        return await withPostHogUrl(context, filtered, `/conversations/tickets/${filtered.id}`)
+        return await withPostHogUrl(context, filtered, `/support/tickets/${filtered.id}`)
     },
 })
 
@@ -204,7 +204,7 @@ const conversationsTicketsUpdate = (): ToolBase<
             path: `/api/projects/${encodeURIComponent(String(projectId))}/conversations/tickets/${encodeURIComponent(String(params.id))}/`,
             body,
         })
-        return await withPostHogUrl(context, result, `/conversations/tickets/${result.id}`)
+        return await withPostHogUrl(context, result, `/support/tickets/${result.id}`)
     },
 })
 
@@ -230,7 +230,7 @@ const conversationsViewsList = (): ToolBase<
             ...result,
             results: (result.results ?? []).map((item: any) => pickResponseFields(item, ['short_id', 'name'])),
         } as typeof result
-        return await withPostHogUrl(context, filtered, '/conversations/tickets')
+        return await withPostHogUrl(context, filtered, '/support/tickets')
     },
 })
 
