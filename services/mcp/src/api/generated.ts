@@ -39211,6 +39211,20 @@ export namespace Schemas {
       scraping_status?: ScrapingStatusEnum | BlankEnum | null;
     }
 
+    /**
+     * Minimal summary of a ticket that was merged into another (output-only).
+     */
+    export interface MergedTicketSummary {
+      /** Merged ticket UUID. */
+      readonly id: string;
+      /** Human-readable number of the merged ticket. */
+      readonly ticket_number: number;
+      /** Status of the merged ticket. */
+      readonly status: string;
+      /** When it was merged into this ticket. */
+      readonly merged_at: string;
+    }
+
     export type MessageContextualTools = { [key: string]: unknown };
 
     /**
@@ -45360,6 +45374,8 @@ export namespace Schemas {
          * @nullable
          */
       readonly merged_into_ticket_number: number | null;
+      /** Tickets that have been merged into this ticket. */
+      readonly merged_tickets: readonly MergedTicketSummary[];
     }
 
     export interface PaginatedTicketList {
@@ -53391,6 +53407,8 @@ export namespace Schemas {
          * @nullable
          */
       readonly merged_into_ticket_number?: number | null;
+      /** Tickets that have been merged into this ticket. */
+      readonly merged_tickets?: readonly MergedTicketSummary[];
     }
 
     /**
@@ -68957,8 +68975,14 @@ export namespace Schemas {
     }
 
     export interface TicketError {
+      /** Human-readable error message. */
       detail: string;
+      /** Machine-readable error code, when applicable. */
       error_type?: string;
+      /** For target_already_merged: the UUID of the root ticket the target is merged into. */
+      root_ticket_id?: string;
+      /** For target_already_merged: the human-readable number of that root ticket. */
+      root_ticket_number?: number;
     }
 
     /**
