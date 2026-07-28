@@ -183,6 +183,14 @@ export interface Ticket {
     merged_at?: string | null
     merged_into_id?: string | null
     merged_into_ticket_number?: number | null
+    merged_tickets?: MergedTicketSummary[]
+}
+
+export interface MergedTicketSummary {
+    id: string
+    ticket_number: number
+    status: TicketStatus
+    merged_at: string | null
 }
 
 export interface ConversationTicket {
@@ -234,6 +242,10 @@ export interface ChatMessage {
     /** Imported from an external tool (e.g. Zendesk). Such content is untrusted, so its Markdown
      * is rendered with external image auto-loading disabled. */
     fromZendesk?: boolean
+    /** When interleaving merged tickets, the ticket this message came from and its legend color. */
+    sourceTicketId?: string
+    sourceTicketNumber?: number
+    sourceColor?: string
 }
 
 export const statusOptions: { value: TicketStatus | 'all'; label: string }[] = [
