@@ -3,12 +3,16 @@ import { describe, it } from 'node:test'
 
 import {
     buildBlocks,
+    buildRunnerReports,
     enrich,
+    enrichRunnerCandidates,
     fetchCandidatePools,
     flakyTestsUrl,
     REPORT_RUNNERS,
+    repoPathResolver,
     selectReportCandidates,
     tableRows,
+    trackedTestPaths,
 } from './weekly-flaky-report.mjs'
 
 describe('weekly flaky report', () => {
@@ -16,7 +20,7 @@ describe('weekly flaky report', () => {
         const pytestUrl = flakyTestsUrl('pytest')
         const jestUrl = flakyTestsUrl('jest')
 
-        assert.deepEqual(REPORT_RUNNERS, ['pytest'])
+        assert.deepEqual(REPORT_RUNNERS, ['pytest', 'jest'])
         assert.equal(pytestUrl.searchParams.get('runner'), 'pytest')
         assert.equal(jestUrl.searchParams.get('runner'), 'jest')
         assert.equal(jestUrl.searchParams.get('repo'), 'PostHog/posthog')
@@ -27,6 +31,7 @@ describe('weekly flaky report', () => {
         const rows = tableRows(
             [
                 {
+                    runner: 'pytest',
                     selector: 'posthog/test/test_example.py::TestExample::test_report',
                     classification: 'confirmed_flake',
                     quarantined_failed_run_count: 0,
@@ -46,6 +51,10 @@ describe('weekly flaky report', () => {
         const table = blocks.find((block) => block.type === 'table')
 
         assert.ok(table)
+        assert.deepEqual(
+            table.rows[0].map((tableCell) => tableCell.text),
+            ['test', 'runner', 'owner', 'rescued', 'fails', 'logs']
+        )
         for (const tableCell of table.rows.flat()) {
             assert.ok(['raw_text', 'raw_number', 'rich_text'].includes(tableCell.type))
         }
@@ -64,7 +73,8 @@ describe('weekly flaky report', () => {
                 },
             ],
         })
-        assert.deepEqual(rows[0][4], {
+        assert.deepEqual(rows[0][1], { type: 'raw_text', text: 'pytest' })
+        assert.deepEqual(rows[0][5], {
             type: 'rich_text',
             elements: [
                 {
@@ -135,6 +145,83 @@ describe('weekly flaky report', () => {
                 ['jest', ['jest.test']],
             ]
         )
+    })
+
+    it('ranks and limits each runner independently', async () => {
+        const candidatePools = ['pytest', 'jest'].map((runner) => ({
+            runner,
+            candidates: Array.from({ length: 12 }, (_, index) => ({
+                runner,
+                selector: `${runner}-${index}`,
+                failed_run_count: index === 10 ? 20 : 5,
+            })),
+        }))
+        const runnerReports = await buildRunnerReports(candidatePools, async () => (item) => ({
+            runsRescued: item.selector.endsWith('-11') ? 1 : 0,
+            evidence: [],
+        }))
+
+        for (const { runner, candidates } of runnerReports) {
+            assert.equal(candidates.length, 10)
+            assert.deepEqual(
+                candidates.map((candidate) => candidate.selector),
+                [`${runner}-11`, `${runner}-10`, ...Array.from({ length: 8 }, (_, index) => `${runner}-${index}`)]
+            )
+        }
+        assert.deepEqual(
+            runnerReports.flatMap(({ candidates }) => candidates.map((candidate) => candidate.runner)),
+            [...Array(10).fill('pytest'), ...Array(10).fill('jest')]
+        )
+    })
+
+    it('resolves tracked Python and JavaScript-family test paths', () => {
+        let gitArguments
+        const expectedPaths = [
+            'posthog/test/test_report.py',
+            'frontend/src/report.test.js',
+            'frontend/src/report.test.jsx',
+            'frontend/src/report.test.ts',
+            'frontend/src/report.test.tsx',
+        ]
+        const trackedPaths = trackedTestPaths((command, args) => {
+            gitArguments = { command, args }
+            return expectedPaths.join('\n')
+        })
+        const toRepoPaths = repoPathResolver(trackedPaths)
+
+        assert.deepEqual(gitArguments, {
+            command: 'git',
+            args: ['ls-files', '*.py', '*.js', '*.jsx', '*.ts', '*.tsx'],
+        })
+        for (const path of expectedPaths) {
+            assert.deepEqual(toRepoPaths(path), [path])
+        }
+        assert.deepEqual(toRepoPaths('src/report.test.tsx'), ['frontend/src/report.test.tsx'])
+    })
+
+    it('omits unsupported Jest enrichment and renders fallback cells', async () => {
+        let enrichmentRequested = false
+        const item = {
+            runner: 'jest',
+            selector: 'frontend/src/report.test.ts::renders the report',
+            classification: 'confirmed_flake',
+            quarantined_failed_run_count: 0,
+            failed_run_count: 3,
+        }
+        const extrasFor = await enrichRunnerCandidates('jest', [item], async () => {
+            enrichmentRequested = true
+            return { results: [] }
+        })
+        const [row] = tableRows(
+            [item],
+            () => ({ owner: 'team-devex', repoPath: 'frontend/src/report.test.ts' }),
+            extrasFor
+        )
+
+        assert.equal(enrichmentRequested, false)
+        assert.deepEqual(row[1], { type: 'raw_text', text: 'Jest' })
+        assert.deepEqual(row[3], { type: 'raw_text', text: '-' })
+        assert.deepEqual(row[5], { type: 'raw_text', text: '-' })
     })
 
     it('scopes enrichment to the current repository', async () => {

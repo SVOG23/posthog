@@ -1,11 +1,11 @@
 // Weekly flaky-test report, posted to #flakey-tests on Monday.
 //
 // PULL model, sibling of eng-analytics-weekly-digest.mjs: reads the
-// engineering_analytics flaky_tests endpoint for candidates, then one HogQL read
-// of the product's ci_failures view joined to the synced runs table for the
-// rerun-rescue counts and failing-job evidence links the endpoint does not carry
-// yet. The product owns the flake signal; this owns cadence, owner attribution,
-// and the relay.
+// engineering_analytics flaky_tests endpoint for candidates, then one pytest-only
+// HogQL read of the product's ci_failures view joined to the synced runs table for
+// the rerun-rescue counts and failing-job evidence links the endpoint does not
+// carry yet. The product owns the flake signal; this owns cadence, owner
+// attribution, and the relay.
 //
 //   GHA cron ──> flaky_tests endpoint + one HogQL query ──> Slack
 //
@@ -34,7 +34,8 @@ const GITHUB_REF_NAME = process.env.GITHUB_REF_NAME || 'master'
 const TOP_N = 10
 const CANDIDATE_POOL = 40
 const CLUSTER_MIN_TESTS = 5
-const REPORT_RUNNERS = ['pytest']
+const REPORT_RUNNERS = ['pytest', 'jest']
+const RUNNER_LABELS = { pytest: 'pytest', jest: 'Jest' }
 
 const RETRY_ATTEMPTS = 3
 const RETRY_DELAY_MS = 30_000
@@ -143,14 +144,20 @@ async function fetchCandidatePools(runners, fetchTests = fetchFlakyTests) {
 
 // Product suites run from their product dir, so a selector path may be repo- or
 // product-relative — suffix-match the tracked index (full even under sparse checkout).
-function repoPathResolver() {
+function trackedTestPaths(runGit = execFileSync) {
     // The tracked-file list is a few MB; the 1MB execFileSync default truncates it.
-    const tracked = execFileSync('git', ['ls-files', '*.py'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    return runGit('git', ['ls-files', '*.py', '*.js', '*.jsx', '*.ts', '*.tsx'], {
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+    })
         .split('\n')
         .filter(Boolean)
-    const trackedSet = new Set(tracked)
+}
+
+function repoPathResolver(trackedPaths = trackedTestPaths()) {
+    const trackedSet = new Set(trackedPaths)
     const bySuffix = new Map()
-    for (const path of tracked) {
+    for (const path of trackedPaths) {
         const base = path.split('/').pop()
         if (!bySuffix.has(base)) {
             bySuffix.set(base, [])
@@ -267,6 +274,17 @@ async function enrich(items, runHogql = hogql) {
     return (item) => enriched.get(item.selector) || empty
 }
 
+async function enrichRunnerCandidates(runner, candidates, runHogql = hogql) {
+    if (runner === 'pytest') {
+        return enrich(
+            candidates.filter((item) => !item.cluster_size),
+            runHogql
+        )
+    }
+    const empty = { runsRescued: null, evidence: [] }
+    return () => empty
+}
+
 // 5+ co-failing tests in one file are one shared-fixture incident, not N flakes.
 function collapseClusters(items) {
     const byFile = new Map()
@@ -281,6 +299,7 @@ function collapseClusters(items) {
     for (const [file, group] of byFile) {
         if (group.length >= CLUSTER_MIN_TESTS) {
             collapsed.push({
+                runner: group[0].runner,
                 selector: file,
                 cluster_size: group.length,
                 failed_run_count: group.reduce((sum, item) => sum + item.failed_run_count, 0),
@@ -292,6 +311,29 @@ function collapseClusters(items) {
         }
     }
     return collapsed
+}
+
+// Rescued runs first (the strongest per-test signal), clusters and the rest by volume.
+function rankReportCandidates(items, extrasFor) {
+    return items
+        .map((item, index) => ({ item, index }))
+        .sort(
+            (left, right) =>
+                (extrasFor(right.item).runsRescued ?? 0) - (extrasFor(left.item).runsRescued ?? 0) ||
+                right.item.failed_run_count - left.item.failed_run_count ||
+                left.index - right.index
+        )
+        .slice(0, TOP_N)
+        .map(({ item }) => item)
+}
+
+async function buildRunnerReports(candidatePools, getEnrichment = enrichRunnerCandidates) {
+    return Promise.all(
+        candidatePools.map(async ({ runner, candidates }) => {
+            const extrasFor = await getEnrichment(runner, candidates)
+            return { runner, candidates: rankReportCandidates(candidates, extrasFor), extrasFor }
+        })
+    )
 }
 
 function cell(text) {
@@ -329,6 +371,7 @@ function tableRows(items, ownerFor, extrasFor) {
         }))
         return [
             testCell,
+            cell(RUNNER_LABELS[item.runner] || item.runner),
             cell(owner.replace(/^team-/, '') + quarantined),
             cell(runsRescued == null ? '-' : String(runsRescued)),
             cell(String(item.failed_run_count)),
@@ -344,7 +387,7 @@ function buildBlocks(now, rows) {
             type: 'section',
             text: {
                 type: 'mrkdwn',
-                text: `*Top ${rows.length} flaky tests — ${dateLabel}* _(backend CI, last 7 days)_`,
+                text: `*Weekly flaky tests - ${dateLabel}* _(CI, last 7 days, up to ${TOP_N} per runner)_`,
             },
         },
         {
@@ -352,11 +395,15 @@ function buildBlocks(now, rows) {
             column_settings: [
                 { align: 'left' },
                 { align: 'left' },
+                { align: 'left' },
                 { align: 'right' },
                 { align: 'right' },
                 { align: 'left' },
             ],
-            rows: [[cell('test'), cell('owner'), cell('rescued'), cell('fails'), cell('logs')], ...rows],
+            rows: [
+                [cell('test'), cell('runner'), cell('owner'), cell('rescued'), cell('fails'), cell('logs')],
+                ...rows,
+            ],
         },
         {
             type: 'context',
@@ -402,22 +449,15 @@ async function main() {
         return
     }
     const now = new Date()
-    const [{ candidates: pool }] = await fetchCandidatePools(REPORT_RUNNERS)
-    const extrasFor = await enrich(pool.filter((item) => !item.cluster_size))
-    // Rescued runs first (the strongest per-test signal), clusters and the rest by volume.
-    const flaky = pool
-        .sort(
-            (a, b) =>
-                (extrasFor(b).runsRescued ?? 0) - (extrasFor(a).runsRescued ?? 0) ||
-                b.failed_run_count - a.failed_run_count
-        )
-        .slice(0, TOP_N)
-    if (flaky.length === 0) {
+    const runnerReports = await buildRunnerReports(await fetchCandidatePools(REPORT_RUNNERS))
+    const reportCandidates = runnerReports.flatMap(({ candidates }) => candidates)
+    if (reportCandidates.length === 0) {
         console.info('No qualifying flaky tests this week — nothing to post.')
         return
     }
-    const ownerFor = resolveOwners(flaky)
-    const blocks = buildBlocks(now, tableRows(flaky, ownerFor, extrasFor))
+    const ownerFor = resolveOwners(reportCandidates)
+    const rows = runnerReports.flatMap(({ candidates, extrasFor }) => tableRows(candidates, ownerFor, extrasFor))
+    const blocks = buildBlocks(now, rows)
     if (DRY_RUN) {
         console.info(JSON.stringify(blocks, null, 2))
         return
@@ -436,4 +476,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     })
 }
 
-export { buildBlocks, enrich, fetchCandidatePools, flakyTestsUrl, REPORT_RUNNERS, selectReportCandidates, tableRows }
+export {
+    buildBlocks,
+    buildRunnerReports,
+    enrich,
+    enrichRunnerCandidates,
+    fetchCandidatePools,
+    flakyTestsUrl,
+    REPORT_RUNNERS,
+    repoPathResolver,
+    selectReportCandidates,
+    tableRows,
+    trackedTestPaths,
+}
