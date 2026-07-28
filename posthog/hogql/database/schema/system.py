@@ -1523,8 +1523,17 @@ support_tickets: PostgresTable = PostgresTable(
             expr=ast.Call(name="toInt", args=[ast.Field(chain=["_ai_resolved"])]),
             description="1 if the ticket was resolved by AI without human escalation, 0 otherwise.",
         ),
+        "_identity_verified": BooleanDatabaseField(name="identity_verified", nullable=True, hidden=True),
+        "identity_verified": ExpressionField(
+            name="identity_verified",
+            expr=ast.Call(name="toInt", args=[ast.Field(chain=["_identity_verified"])]),
+            description="1 if the requester's identity was attested (verified), 0 if assessed but not attested, null if never assessed.",
+        ),
         "escalation_reason": StringDatabaseField(
             name="escalation_reason", nullable=True, description="Why the ticket was escalated to a human, if it was."
+        ),
+        "ai_triage": StringJSONDatabaseField(
+            name="ai_triage", description="JSON metadata from AI triage of the ticket (e.g. suggested routing)."
         ),
         "message_count": IntegerDatabaseField(
             name="message_count", description="Total number of messages in the ticket."
@@ -1555,6 +1564,21 @@ support_tickets: PostgresTable = PostgresTable(
         ),
         "sla_due_at": DateTimeDatabaseField(
             name="sla_due_at", nullable=True, description="When the ticket's SLA response is due."
+        ),
+        "snoozed_until": DateTimeDatabaseField(
+            name="snoozed_until",
+            nullable=True,
+            description="When set, the ticket is on hold until this time, then auto-reopened.",
+        ),
+        "organization_id": StringDatabaseField(
+            name="organization_id",
+            nullable=True,
+            description="The requester's PostHog organization key, if resolved (identifies the customer).",
+        ),
+        "organization_id_source": StringDatabaseField(
+            name="organization_id_source",
+            nullable=True,
+            description="How organization_id was resolved, e.g. 'person' or 'slack_channel_account'.",
         ),
         "tag_names": StringArrayDatabaseField(
             name="tag_names", nullable=True, description="Tag names applied to the ticket, e.g. 'support_sme_analytics'."
