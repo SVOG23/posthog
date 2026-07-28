@@ -1156,6 +1156,19 @@ class SignalScoutConfig(ModelActivityMixin, TeamScopedRootMixin, UUIDModel):
     # Stamped by the coordinator after each dispatch; drives the due-check. Written every
     # run, so it is excluded from activity logging (see field_exclusions below).
     last_run_at = models.DateTimeField(null=True, blank=True)
+    # Circuit breaker over this lane's run outcomes, maintained by the runner: bumped on a
+    # failed run, zeroed on a successful one. At `FAILURE_STREAK_PAUSE_THRESHOLD` the runner
+    # stamps `auto_paused_at` and the coordinator stops dispatching, apart from one probe per
+    # `AUTO_PAUSE_PROBE_INTERVAL_S`. Without it a lane that can never succeed re-dispatches
+    # forever, taking a full-length sandbox lease per interval to produce nothing. Written on
+    # every run, so all three fields are excluded from activity logging like `last_run_at` —
+    # the `signals_scout_config_auto_paused` event is the audit record for a trip.
+    consecutive_failure_count = models.PositiveIntegerField(default=0, db_default=0)
+    # When the breaker last tripped (or a probe re-failed). Null = closed, dispatching normally.
+    auto_paused_at = models.DateTimeField(null=True, blank=True)
+    # Truncated failure signature of the run that tripped it, so "why is this scout paused?" is
+    # answerable from the config row rather than only from the failure event stream.
+    auto_pause_reason = models.TextField(blank=True, default="", db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(

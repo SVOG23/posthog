@@ -182,6 +182,9 @@ it is exercised via the `run_signals_scout` management command (see `../manageme
   `ACTIVITY_SLACK_S`, and `WORKFLOW_HARD_CEILING_S` (`= DEFAULT_MAX_RUNTIME_S +
 ACTIVITY_SLACK_S`, the activity-level ceiling that gates the workflow's
   `start_to_close_timeout`).
+  Also the failure-streak circuit breaker's two knobs: `FAILURE_STREAK_PAUSE_THRESHOLD`
+  (consecutive failed runs before a lane auto-pauses) and `AUTO_PAUSE_PROBE_INTERVAL_S`
+  (how long a tripped breaker holds before the coordinator lets one probe through).
 - `team_limits.py`
   Single source of truth for a team's effective scout caps + metadata, resolved from the
   `signals-scout` flag payload in one read. The same three-layer cap resolution
@@ -242,6 +245,21 @@ one sandbox session → zero or more emitted signals.
   the app layer (failing any `QUEUED`/`IN_PROGRESS` run older than `STALE_RUN_CUTOFF_S` before
   the guard), so a worker crash no longer wedges a lane permanently. A `task_run.status`-based
   DB constraint is still a possible follow-up for stronger single-flight guarantees.
+- A `(team, skill)` lane that never succeeds is its own failure mode, distinct from the orphan
+  case above: every dispatch is well-formed, takes a sandbox lease for the full runtime cap,
+  produces nothing, and books a `failed` run — indefinitely, since the lane stays due every tick
+  and nothing reconciles "this has never worked".
+  The runner maintains a circuit breaker on the config row for it (`consecutive_failure_count`,
+  `auto_paused_at`, `auto_pause_reason`): bumped on a failed run, zeroed on a successful one, and
+  at `FAILURE_STREAK_PAUSE_THRESHOLD` the lane auto-pauses and the coordinator's
+  `_auto_pause_blocks_dispatch` holds it to one probe per `AUTO_PAUSE_PROBE_INTERVAL_S`.
+  The breaker is half-open on purpose — a pause is not a tombstone, so a probe that succeeds
+  clears it and normal cadence resumes with nobody intervening; a probe that fails re-stamps the
+  cooldown. It is deliberately **separate from `enabled`**, which stays the operator's intent:
+  the breaker must not silently rewrite it or look, in the UI or the audit log, like someone did.
+  The state is read-only on the config serializers (`scout-configs-list`); editing the config or
+  running the scout manually clears it, and the trip emits
+  `signals_scout_config_auto_paused` once.
 - The sandbox is opened with the team's MCP token plus the harness-internal tools.
   The skill body is loaded into the system prompt; each scout has its own
   `SignalScoutConfig` row (keyed on `(team, skill_name)`) whose `enabled` flag,
@@ -284,6 +302,16 @@ one sandbox session → zero or more emitted signals.
   When the `scouts-model-selection` gate (or a runtime pin) routes the run, `started` and
   `finished` also carry `model` / `runtime_adapter`, so run outcomes are sliceable by model
   without joining through `$ai_generation`; absence means the agent-server default served it.
+  A `finished` run that died at the per-turn poll wall also carries the turn-log diagnostics
+  from `TurnPollTimeout.diagnostics()` (`poll_timeout_stage` +
+  elapsed/stale/line counts), because every wall failure raises one error string and the fleet's
+  timeout rate is otherwise a single undifferentiated bucket: `no_turn_output` (the agent never
+  emitted a turn-relevant line — it never got going), `stalled_after_output` (worked, then went
+  quiet past the salvage window), `active_at_budget` (still streaming when the budget expired —
+  the budget is the constraint, not the agent).
+  `signals_scout_config_auto_paused` fires once when a `(team, skill)` lane's failure-streak
+  breaker trips (see the run-lifecycle bullet below) — the alertable signal for a wedged lane,
+  which is otherwise invisible in a stream of individually-unremarkable `failed` runs.
   The report channel adds `signals_scout_report_emitted` / `signals_scout_report_edited`
   (plus customer-facing `$scout_report_*` copies), stamped with derived classification
   properties (`report_kind` = `finding`/`self_improvement`, `is_self_improvement_report`)
@@ -322,6 +350,8 @@ one sandbox session → zero or more emitted signals.
   per-scout schedule (`run_interval_minutes`, default every 24 hours, or an optional
   project-local cron `run_cron_schedule` that takes precedence) is due, most-overdue first, hard cap
   `MAX_RUNS_PER_TICK = 50` per tick, `ScheduleOverlapPolicy.SKIP` to drop ticks rather than queue them.
+  A scout whose failure-streak breaker has tripped is skipped here too, apart from its periodic
+  probe (`_auto_pause_blocks_dispatch`).
 - **Models** — `SignalScoutConfig`, `SignalScoutRun`, `SignalScratchpad`,
   `SignalScoutNote`, `SignalProjectProfile` in `../models.py`.
 - **Source variant** — `SignalSourceConfig.SourceProduct.SIGNALS_SCOUT` paired with

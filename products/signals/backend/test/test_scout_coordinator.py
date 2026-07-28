@@ -24,6 +24,7 @@ from posthog.sync import database_sync_to_async
 from products.signals.backend.models import SignalScoutConfig
 from products.signals.backend.scout_harness.config_registry import register_missing_configs
 from products.signals.backend.scout_harness.lazy_seed import HARNESS_SEEDED_BY, sync_canonical_skills
+from products.signals.backend.scout_harness.limits import AUTO_PAUSE_PROBE_INTERVAL_S
 
 # The flag-payload read + per-team cap resolution live in `scout_harness/team_limits.py`; helpers
 # defined there are imported and patched there (see `_PAYLOAD_PATH` / `_IS_CLOUD_PATH`).
@@ -51,6 +52,7 @@ from products.signals.backend.temporal.agentic.scout_coordinator import (
     SignalsScoutCoordinatorWorkflow,
     StampDispatchedRunsInput,
     _allocate_tick_budget,
+    _auto_pause_blocks_dispatch,
     _DueRun,
     _overdue_seconds,
     fetch_enabled_signals_scout_runs_activity,
@@ -473,6 +475,27 @@ async def test_config_whose_skill_is_gone_is_skipped(ateam):
 
 
 # ── Schedule: deterministic due-check, no sampling ──────────────────────────────
+
+
+class TestFailureStreakBreakerGate:
+    @parameterized.expand(
+        [
+            ("never_tripped", None, False),
+            ("inside_cooldown", AUTO_PAUSE_PROBE_INTERVAL_S - 60, True),
+            ("cooldown_elapsed_allows_probe", AUTO_PAUSE_PROBE_INTERVAL_S + 60, False),
+        ]
+    )
+    def test_auto_paused_lane_is_skipped_until_its_probe_is_due(
+        self, _name: str, paused_seconds_ago: int | None, expected_blocked: bool
+    ) -> None:
+        now = datetime.fromisoformat("2026-07-28T14:00:00+00:00")
+        config = SignalScoutConfig(
+            skill_name="signals-scout-general",
+            consecutive_failure_count=5,
+            auto_paused_at=None if paused_seconds_ago is None else now - timedelta(seconds=paused_seconds_ago),
+        )
+
+        assert _auto_pause_blocks_dispatch(config, now) is expected_blocked
 
 
 class TestCronScheduleDueCheck:

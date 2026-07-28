@@ -392,11 +392,15 @@ signal_exclusions: dict[ActivityScope, list[str]] = {
     "Subscription": [
         "next_delivery_date",
     ],
-    # `last_run_at` is written by the scout coordinator on every tick (~every 15 min per scout).
-    # When that is the only change, suppress the activity signal entirely so run bookkeeping
-    # never spams the audit log.
+    # `last_run_at` is written by the scout coordinator on every tick (~every 15 min per scout),
+    # and the failure-streak breaker fields by the runner on every run outcome. When those are
+    # the only change, suppress the activity signal entirely so run bookkeeping never spams the
+    # audit log — a breaker trip is recorded by `signals_scout_config_auto_paused` instead.
     "SignalScoutConfig": [
         "last_run_at",
+        "consecutive_failure_count",
+        "auto_paused_at",
+        "auto_pause_reason",
     ],
 }
 
@@ -748,6 +752,9 @@ field_exclusions: dict[AuditableScope, list[str]] = {
         # Run bookkeeping, not user intent — keep it out of change detection even when it
         # rides along with a real change (belt-and-suspenders with signal_exclusions above).
         "last_run_at",
+        "consecutive_failure_count",
+        "auto_paused_at",
+        "auto_pause_reason",
         # Reverse relations auto-managed by FK creates, not user-initiated config changes.
         "runs",
     ],

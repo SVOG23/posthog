@@ -19,7 +19,11 @@ from posthog.sync import database_sync_to_async
 from products.signals.backend.agent_runtime import STEP_SCOUT, resolve_agent_runtime
 from products.signals.backend.models import SignalScoutConfig, SignalScoutRun
 from products.signals.backend.scout_harness.lazy_seed import sync_canonical_skills
-from products.signals.backend.scout_harness.limits import DEFAULT_MAX_RUNTIME_S, STALE_RUN_CUTOFF_S
+from products.signals.backend.scout_harness.limits import (
+    DEFAULT_MAX_RUNTIME_S,
+    FAILURE_STREAK_PAUSE_THRESHOLD,
+    STALE_RUN_CUTOFF_S,
+)
 from products.signals.backend.scout_harness.model_selection import resolve_scout_model
 from products.signals.backend.scout_harness.prompt import SignalScoutRunSummary, build_run_prompt
 from products.signals.backend.scout_harness.skill_loader import (
@@ -34,7 +38,7 @@ from products.signals.backend.temporal.agentic import (
     resolve_acting_user_id_for_team,
 )
 from products.tasks.backend.facade import api as tasks_facade
-from products.tasks.backend.facade.agents import CustomPromptSandboxContext, MultiTurnSession
+from products.tasks.backend.facade.agents import CustomPromptSandboxContext, MultiTurnSession, TurnPollTimeout
 
 if TYPE_CHECKING:
     from products.tasks.backend.models import TaskRun
@@ -262,6 +266,10 @@ async def arun_signals_scout(
         emitted_count, _ = await database_sync_to_async(_read_run_metrics, thread_sensitive=False)(
             run_id, team.parent_team_id or team.id
         )
+        # A run that got all the way through closes the breaker: the lane works, so any streak
+        # it had accumulated is stale and a standing auto-pause is lifted (this is also how the
+        # half-open probe recovers a paused lane once its underlying cause is fixed).
+        await database_sync_to_async(_clear_failure_streak, thread_sensitive=False)(config.pk)
         _capture_run_finished(
             team=team,
             config=config,
@@ -312,6 +320,11 @@ async def arun_signals_scout(
             if row_persisted
             else (0, None)
         )
+        # Advance the breaker before the event so the failure that trips it is the one whose
+        # `error_message` explains the pause.
+        streak = await database_sync_to_async(_record_failure_streak, thread_sensitive=False)(
+            config.pk, reason=str(exc)[:300]
+        )
         _capture_run_finished(
             team=team,
             config=config,
@@ -325,7 +338,17 @@ async def arun_signals_scout(
             runtime_adapter=runtime_adapter,
             error_type=type(exc).__name__,
             error_message=str(exc)[:300],
+            extra_properties=_poll_timeout_properties(exc),
         )
+        if streak is not None and streak.tripped:
+            _capture_config_auto_paused(
+                team=team,
+                config=config,
+                skill_name=skill.name,
+                run_id=run_id,
+                failure_count=streak.count,
+                reason=str(exc)[:300],
+            )
         return RunResult(
             run_id=str(run_id) if row_persisted else None,
             task_run_id=None,
@@ -355,7 +378,10 @@ async def arun_signals_scout(
             },
         )
         # Synchronous, no DB read — the loop is collapsing, so don't await anything here;
-        # `emitted_count` is left unknown rather than risk a query during cancellation.
+        # `emitted_count` is left unknown rather than risk a query during cancellation. The
+        # failure-streak breaker is deliberately untouched too: a cancelled run says nothing
+        # about whether this lane can succeed, and counting worker shutdowns toward the streak
+        # would pause healthy scouts after a few deploys.
         _capture_run_finished(
             team=team,
             config=config,
@@ -695,6 +721,71 @@ def _create_run_row(
     )
 
 
+@dataclass(frozen=True)
+class _FailureStreak:
+    """Breaker state after a failed run. `tripped` is the *transition* into auto-paused, not
+    the paused state itself — a re-failed probe re-stamps the cooldown without tripping again,
+    so the alerting event fires once per wedge rather than once per doomed run."""
+
+    count: int
+    tripped: bool
+
+
+def _clear_failure_streak(config_id: Any) -> None:
+    """Zero the breaker after a successful run. Best-effort: the run succeeded, so a bookkeeping
+    failure here must not turn it into a failure. The `exclude` narrows the UPDATE to rows that
+    actually carry state, so the common case (a healthy lane) does no write at all."""
+    try:
+        SignalScoutConfig.all_teams.filter(pk=config_id).exclude(
+            consecutive_failure_count=0, auto_paused_at=None
+        ).update(consecutive_failure_count=0, auto_paused_at=None, auto_pause_reason="")
+    except Exception:
+        logger.exception("signals_scout: failed to clear failure streak", extra={"scout_config_id": str(config_id)})
+
+
+def _record_failure_streak(config_id: Any, *, reason: str) -> _FailureStreak | None:
+    """Bump the failure streak and trip the breaker at the threshold. Returns None when the row
+    is gone or the write failed — the caller only uses the result to decide whether to emit the
+    auto-paused event, and a failure here must never mask the run's own error.
+
+    Not a compare-and-set: the runner's single-flight guard means one run per (team, skill) at a
+    time, so read-then-write can only race a config edit, where losing the increment is harmless.
+    """
+    try:
+        row = (
+            SignalScoutConfig.all_teams.filter(pk=config_id)
+            .values_list("consecutive_failure_count", "auto_paused_at")
+            .first()
+        )
+        if row is None:
+            return None
+        count = (row[0] or 0) + 1
+        already_paused = row[1] is not None
+        fields: dict[str, Any] = {"consecutive_failure_count": count}
+        if count >= FAILURE_STREAK_PAUSE_THRESHOLD:
+            # Re-stamped on every failure past the threshold, including a failed probe, so the
+            # cooldown always runs from the most recent evidence that the lane is still broken.
+            fields["auto_paused_at"] = timezone.now()
+            fields["auto_pause_reason"] = reason
+        SignalScoutConfig.all_teams.filter(pk=config_id).update(**fields)
+        return _FailureStreak(count=count, tripped=count >= FAILURE_STREAK_PAUSE_THRESHOLD and not already_paused)
+    except Exception:
+        logger.exception("signals_scout: failed to record failure streak", extra={"scout_config_id": str(config_id)})
+        return None
+
+
+def _poll_timeout_properties(exc: BaseException) -> dict[str, Any] | None:
+    """Turn-log diagnostics for a run that died at the per-turn poll wall, or None for any other
+    failure. Every wall failure raises the same error string, which is why the fleet's timeout
+    rate reads as one cause; these properties split it into the populations that need different
+    fixes — an agent that never emitted a single turn-relevant line (never started), one that
+    worked and then went silent, and one still streaming when the budget ran out (the budget,
+    not the agent, is the constraint)."""
+    if not isinstance(exc, TurnPollTimeout):
+        return None
+    return exc.diagnostics()
+
+
 def _run_row_exists(run_id: Any, team_id: int) -> bool:
     return SignalScoutRun.objects.unscoped().filter(team_id=team_id, id=run_id).exists()
 
@@ -797,6 +888,44 @@ def _capture_run_reaped(
         )
 
 
+def _capture_config_auto_paused(
+    *,
+    team: Team,
+    config: SignalScoutConfig,
+    skill_name: str,
+    run_id: Any,
+    failure_count: int,
+    reason: str,
+) -> None:
+    """Emit a scout-owned event when a lane's failure-streak breaker trips.
+
+    The state is also readable on the config row (and its API surface), but a wedge needs to be
+    *noticed*, not looked up: a lane that has never once succeeded is otherwise indistinguishable
+    from healthy traffic in the `signals_scout_run_finished` stream, which is why one tenant could
+    fail every run for days with an empty inbox and nobody see it. Fires only on the transition, so
+    a count here is a count of wedges. Best-effort: a capture failure must never affect the run.
+    """
+    try:
+        posthoganalytics.capture(
+            event="signals_scout_config_auto_paused",
+            distinct_id=str(team.uuid),
+            properties={
+                "skill_name": skill_name,
+                "scout_config_id": str(config.id),
+                "run_id": str(run_id),
+                "consecutive_failure_count": failure_count,
+                "failure_streak_threshold": FAILURE_STREAK_PAUSE_THRESHOLD,
+                "auto_pause_reason": reason,
+            },
+            groups=groups(team.organization, team),
+        )
+    except Exception:
+        logger.warning(
+            "signals_scout: failed to capture config auto-paused analytics event",
+            extra={"team_id": team.id, "skill_name": skill_name},
+        )
+
+
 def _attach_model_props(properties: dict[str, Any], *, model: str | None, runtime_adapter: str | None) -> None:
     # Only attached when the `scouts-model-selection` gate (or a runtime pin) routed the run —
     # absence means the agent-server default served it. Makes run outcomes (timeout rate, runtime,
@@ -821,6 +950,7 @@ def _capture_run_finished(
     runtime_adapter: str | None = None,
     error_type: str | None = None,
     error_message: str | None = None,
+    extra_properties: dict[str, Any] | None = None,
 ) -> None:
     """Emit the scout-owned per-run analytics event.
 
@@ -835,6 +965,9 @@ def _capture_run_finished(
     are attached so the failure rate is breakable down by cause without digging into worker
     logs — the bulk of scout failures fail in this layer before the `process-task` workflow's
     own `task_run_failed` event ever fires, so this is the only event that carries their reason.
+    `extra_properties` carries cause-specific detail the error string can't (today: the turn-log
+    diagnostics behind a per-turn poll timeout, which is a single string covering several
+    distinct failures).
     """
     properties: dict[str, Any] = {
         "skill_name": skill.name,
@@ -852,6 +985,8 @@ def _capture_run_finished(
     if error_type is not None:
         properties["error_type"] = error_type
         properties["error_message"] = error_message
+    if extra_properties:
+        properties.update(extra_properties)
     try:
         posthoganalytics.capture(
             event="signals_scout_run_finished",

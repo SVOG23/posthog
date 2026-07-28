@@ -21,6 +21,7 @@ from posthog.temporal.common.heartbeat import Heartbeater
 from products.signals.backend.models import SignalScoutConfig
 from products.signals.backend.scout_harness.config_registry import live_scout_skill_names, register_missing_configs
 from products.signals.backend.scout_harness.lazy_seed import sync_canonical_skills
+from products.signals.backend.scout_harness.limits import AUTO_PAUSE_PROBE_INTERVAL_S
 
 # Per-team cap resolution + the flag-payload read live in the temporalio-free `team_limits` module
 # so the HTTP metadata surface can share them. Imported by name so the planning code below calls
@@ -228,6 +229,8 @@ def _collect_planned_runs(
             overdue_s = _overdue_seconds(config, now, team.timezone_info)
             if overdue_s is None:
                 continue
+            if _auto_pause_blocks_dispatch(config, now):
+                continue
             due.append(_DueRun(overdue_s, str(config.pk), team.id, config.skill_name))
 
     if not due:
@@ -389,6 +392,35 @@ def _participating_teams(enrollment: Enrollment) -> list[tuple[Team, bool]]:
         return []
     teams = {team.id: team for team in Team.objects.filter(id__in=all_ids)}
     return [(teams[team_id], team_id in explicit) for team_id in sorted(all_ids) if team_id in teams]
+
+
+def _auto_pause_blocks_dispatch(config: SignalScoutConfig, now: datetime) -> bool:
+    """True while a tripped failure-streak breaker is holding this lane back.
+
+    A `(team, skill)` lane that fails every run still looks due every tick, and each dispatch
+    takes a sandbox lease for the full runtime cap to produce nothing — so an unrecoverable lane
+    costs a lease per interval indefinitely, with the only trace in the failure event stream.
+    Once the runner trips the breaker (see `runner._record_failure_streak`), dispatch is held
+    down to one probe per `AUTO_PAUSE_PROBE_INTERVAL_S`; a probe that succeeds clears the pause
+    and normal cadence resumes, so a fixed lane recovers without anyone intervening.
+
+    Deliberately separate from `enabled`: that field is the operator's intent, and the breaker
+    must not silently rewrite it (nor look, in the UI or the audit log, like someone did).
+    """
+    if config.auto_paused_at is None:
+        return False
+    if (now - config.auto_paused_at).total_seconds() >= AUTO_PAUSE_PROBE_INTERVAL_S:
+        return False
+    # Info, not a warning: this is the steady state for a paused lane and would otherwise fire on
+    # every tick for the whole cooldown. The trip itself is the alertable event.
+    logger.info(
+        "signals_scout coordinator: scout auto-paused after repeated failures, skipping dispatch",
+        team_id=config.team_id,
+        skill_name=config.skill_name,
+        consecutive_failure_count=config.consecutive_failure_count,
+        auto_paused_at=config.auto_paused_at.isoformat(),
+    )
+    return True
 
 
 def _overdue_seconds(config: SignalScoutConfig, now: datetime, project_timezone: tzinfo) -> float | None:
