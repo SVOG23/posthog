@@ -25,6 +25,8 @@ export interface MessageProps {
     showAiReplyFeedback?: boolean
     aiReplyFeedbackRating?: AiReplyFeedbackRating | null
     onSubmitAiReplyFeedback?: (rating: AiReplyFeedbackRating, feedbackText?: string) => void
+    /** When multiple tickets are interleaved, show a color-coded pill of the message's source ticket. */
+    showSourcePill?: boolean
 }
 
 export function Message({
@@ -34,6 +36,7 @@ export function Message({
     showAiReplyFeedback = false,
     aiReplyFeedbackRating = null,
     onSubmitAiReplyFeedback,
+    showSourcePill = false,
 }: MessageProps): JSX.Element {
     const profileType = message.authorType === 'AI' ? 'bot' : 'person'
     const isPrivate = message.isPrivate
@@ -86,6 +89,14 @@ export function Message({
                             <span className="text-xs text-muted-alt">
                                 <TZLabel time={message.createdAt} />
                             </span>
+                            {showSourcePill && message.sourceTicketNumber != null && (
+                                <span
+                                    className="inline-flex items-center text-xs font-medium text-white px-1.5 py-0.5 rounded"
+                                    style={{ backgroundColor: message.sourceColor }}
+                                >
+                                    #{message.sourceTicketNumber}
+                                </span>
+                            )}
                         </div>
                     </div>
                     <div className="max-w-full min-w-80">

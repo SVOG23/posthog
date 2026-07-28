@@ -28,6 +28,8 @@ export interface MessageListProps {
     /** Whether AI reply feedback controls are enabled */
     showAiReplyFeedback?: boolean
     onSubmitAiReplyFeedback?: (messageId: string, rating: AiReplyFeedbackRating, feedbackText?: string) => void
+    /** When multiple tickets are interleaved, show a color-coded source-ticket pill on each message. */
+    showSourcePills?: boolean
 }
 
 export function MessageList({
@@ -47,6 +49,7 @@ export function MessageList({
     feedbackByMessageId = {},
     showAiReplyFeedback = false,
     onSubmitAiReplyFeedback,
+    showSourcePills = false,
 }: MessageListProps): JSX.Element {
     const messagesEndRef = useRef<HTMLDivElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
@@ -143,6 +146,7 @@ export function MessageList({
                                               onSubmitAiReplyFeedback(message.id, rating, feedbackText)
                                         : undefined
                                 }
+                                showSourcePill={showSourcePills}
                             />
                         )
                     })}
