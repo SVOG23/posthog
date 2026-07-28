@@ -218,6 +218,7 @@ export type SettingId =
     | 'personal-api-keys'
     | 'personal-integrations-github'
     | 'personal-integrations-slack'
+    | 'personal-integrations-posthog'
     | 'persons-join-mode'
     | 'reminders'
     | 'persons-on-events'
