@@ -64,9 +64,6 @@ def reverse_backfill(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    # Non-atomic so the batched backfill doesn't run inside one long transaction.
-    atomic = False
-
     dependencies = [
         ("conversations", "0055_ticket_denormalized_tags_assignee"),
         ("posthog", "1032_remove_taggeditem_exactly_one_related_object_and_more"),  # TaggedItem.ticket FK

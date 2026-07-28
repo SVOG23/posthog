@@ -1581,7 +1581,9 @@ support_tickets: PostgresTable = PostgresTable(
             description="How organization_id was resolved, e.g. 'person' or 'slack_channel_account'.",
         ),
         "tag_names": StringArrayDatabaseField(
-            name="tag_names", nullable=True, description="Tag names applied to the ticket, e.g. 'support_sme_analytics'."
+            name="tag_names",
+            nullable=True,
+            description="Tag names applied to the ticket, e.g. 'support_sme_analytics'.",
         ),
         "assignee_user_id": IntegerDatabaseField(
             name="assignee_user_id", nullable=True, description="Id of the user the ticket is assigned to, if any."
