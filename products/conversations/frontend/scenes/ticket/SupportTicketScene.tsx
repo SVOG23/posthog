@@ -79,6 +79,8 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
         tags,
         chatMessages,
         showSourcePills,
+        mergedTickets,
+        broadcastToMerged,
         messagesLoading,
         messageSending,
         hasMoreMessages,
@@ -124,6 +126,7 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
         loadTicket,
         loadMessages,
         loadTickets,
+        setBroadcastToMerged,
     } = useActions(logic)
 
     const { user } = useValues(userLogic)
@@ -228,6 +231,9 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
                     <ChatView
                         messages={chatMessages}
                         showSourcePills={showSourcePills}
+                        mergedTicketCount={mergedTickets.length}
+                        broadcastToMerged={broadcastToMerged}
+                        onBroadcastToMergedChange={setBroadcastToMerged}
                         messagesLoading={messagesLoading}
                         messageSending={messageSending}
                         hasMoreMessages={hasMoreMessages}
