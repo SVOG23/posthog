@@ -1556,6 +1556,20 @@ support_tickets: PostgresTable = PostgresTable(
         "sla_due_at": DateTimeDatabaseField(
             name="sla_due_at", nullable=True, description="When the ticket's SLA response is due."
         ),
+        "tag_names": StringArrayDatabaseField(
+            name="tag_names", nullable=True, description="Tag names applied to the ticket, e.g. 'support_sme_analytics'."
+        ),
+        "assignee_user_id": IntegerDatabaseField(
+            name="assignee_user_id", nullable=True, description="Id of the user the ticket is assigned to, if any."
+        ),
+        "assignee_role_id": UUIDDatabaseField(
+            name="assignee_role_id", nullable=True, description="Id of the role/team the ticket is assigned to, if any."
+        ),
+        "assignee_role_name": StringDatabaseField(
+            name="assignee_role_name",
+            nullable=True,
+            description="Name of the role/team the ticket is assigned to, e.g. 'Team Support'.",
+        ),
         "created_at": DateTimeDatabaseField(name="created_at", description="When the ticket was opened."),
         "updated_at": DateTimeDatabaseField(name="updated_at", description="When the ticket was last updated."),
     },
