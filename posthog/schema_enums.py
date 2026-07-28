@@ -2437,6 +2437,13 @@ class ExternalDataSourceType(StrEnum):
     DUCK_LAKE = "DuckLake"
     STARBURST = "Starburst"
     EASYBILL = "Easybill"
+    BILLIT = "Billit"
+    MOXIE = "Moxie"
+    TRIPLE_WHALE = "TripleWhale"
+    DIRECTUS = "Directus"
+    CLAY = "Clay"
+    TRADABLE_BITS = "TradableBits"
+    SWAN = "Swan"
 
 
 class ExternalQueryErrorCode(StrEnum):

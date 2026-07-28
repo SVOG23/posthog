@@ -23920,7 +23920,14 @@
                 "SideShift",
                 "DuckLake",
                 "Starburst",
-                "Easybill"
+                "Easybill",
+                "Billit",
+                "Moxie",
+                "TripleWhale",
+                "Directus",
+                "Clay",
+                "TradableBits",
+                "Swan"
             ],
             "type": "string"
         },
