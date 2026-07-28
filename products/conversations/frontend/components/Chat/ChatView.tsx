@@ -60,12 +60,6 @@ export interface ChatViewProps {
     onSubmitAiReplyFeedback?: (messageId: string, rating: AiReplyFeedbackRating, feedbackText?: string) => void
     /** When multiple tickets are interleaved, show a color-coded source-ticket pill on each message. */
     showSourcePills?: boolean
-    /** Number of tickets merged into this one; enables the "also send to merged tickets" reply option */
-    mergedTicketCount?: number
-    /** Whether the reply should also be sent to every merged ticket's source */
-    broadcastToMerged?: boolean
-    /** Called when the broadcast-to-merged checkbox changes */
-    onBroadcastToMergedChange?: (broadcast: boolean) => void
 }
 
 export function ChatView({
@@ -99,9 +93,6 @@ export function ChatView({
     showAiReplyFeedback,
     onSubmitAiReplyFeedback,
     showSourcePills = false,
-    mergedTicketCount = 0,
-    broadcastToMerged = false,
-    onBroadcastToMergedChange,
 }: ChatViewProps): JSX.Element {
     const listMinHeight = minHeight ?? '400px'
     const listMaxHeight = maxHeight ?? '600px'
@@ -143,9 +134,6 @@ export function ChatView({
                     sendConfirmationMessage={sendConfirmationMessage}
                     sendAndSetStatusOptions={sendAndSetStatusOptions}
                     unsavedTicketChanges={unsavedTicketChanges}
-                    mergedTicketCount={mergedTicketCount}
-                    broadcastToMerged={broadcastToMerged}
-                    onBroadcastToMergedChange={onBroadcastToMergedChange}
                 />
             </div>
         </LemonCard>
