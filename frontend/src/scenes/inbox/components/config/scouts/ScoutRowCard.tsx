@@ -20,7 +20,7 @@ import {
     ScoutRollup,
 } from '../../../utils/scoutRunsWindow'
 import { agentSetupModalLogic } from '../../shell/agentSetupModalLogic'
-import { ScoutOriginBadge } from './ScoutBadges'
+import { ScoutOriginBadge, ScoutPausedBadge } from './ScoutBadges'
 import { ScoutConfigForm, ScoutEnabledSwitch } from './ScoutConfigControls'
 import { ScoutRunBoxes } from './ScoutRunBoxes'
 
@@ -119,6 +119,7 @@ export function ScoutRowCard({
                                 </Link>
                             </Tooltip>
                             <ScoutOriginBadge origin={config.scout_origin} />
+                            {config.auto_paused_at ? <ScoutPausedBadge reason={config.auto_pause_reason} /> : null}
                         </div>
                     </div>
                     <div className="flex items-center gap-1 whitespace-nowrap text-[11px] text-muted">
