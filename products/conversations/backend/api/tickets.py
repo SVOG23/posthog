@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -41,8 +42,10 @@ from posthog.rate_limit import ComposeTicketBurstThrottle, ComposeTicketSustaine
 
 from products.conversations.backend.api.serializers import TicketAssignmentSerializer
 from products.conversations.backend.api.ticket_filters import (
+    MAX_SEARCH_LENGTH,
     TicketViewFiltersSerializer,
     apply_ticket_filters,
+    is_ticket_number_search,
     query_params_to_view_filters,
 )
 from products.conversations.backend.cache import (
@@ -55,6 +58,7 @@ from products.conversations.backend.events import (
     capture_ticket_priority_changed,
     capture_ticket_status_changed,
 )
+from products.conversations.backend.metrics import TICKET_SEARCH_DURATION_SECONDS
 from products.conversations.backend.models import EmailChannel, Ticket, TicketAssignment, TicketView
 from products.conversations.backend.models.constants import Channel, ChannelDetail, Status
 from products.conversations.backend.person_lookup import _get_persons_by_email
@@ -369,6 +373,9 @@ class TicketViewSet(TaggedItemViewSetMixin, TeamAndOrgViewSetMixin, viewsets.Mod
     permission_classes = [IsAuthenticated, APIScopePermission]
     pagination_class = TicketPagination
 
+    # Which search branch safely_get_queryset applied, for the latency histogram.
+    _search_path: str | None = None
+
     def safely_get_queryset(self, queryset: QuerySet) -> QuerySet:
         """Filter tickets by team."""
         queryset = queryset.filter(team_id=self.team_id)
@@ -416,6 +423,10 @@ class TicketViewSet(TaggedItemViewSetMixin, TeamAndOrgViewSetMixin, viewsets.Mod
                 queryset = queryset.filter(snoozed_until__isnull=False)
             elif snoozed_param.lower() == "false":
                 queryset = queryset.filter(snoozed_until__isnull=True)
+
+        search = filters.get("search")
+        if search and len(search) <= MAX_SEARCH_LENGTH:
+            self._search_path = "ticket_number" if is_ticket_number_search(search) else "text"
 
         user = cast("User", self.request.user) if self.request.user and self.request.user.is_authenticated else None
         return apply_ticket_filters(queryset, filters, team=self.team, user=user)
@@ -608,8 +619,9 @@ class TicketViewSet(TaggedItemViewSetMixin, TeamAndOrgViewSetMixin, viewsets.Mod
                 OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 description=(
-                    "Free-text search. A numeric value matches a ticket number exactly; otherwise matches "
-                    "against the customer's name or email (case-insensitive, partial match)."
+                    "Free-text search. A numeric value (optionally prefixed with `#`) matches a ticket number "
+                    "exactly; otherwise matches against the customer's name or email, the email subject, or "
+                    "message content (case-insensitive, partial match)."
                 ),
             ),
             OpenApiParameter(
@@ -676,18 +688,27 @@ class TicketViewSet(TaggedItemViewSetMixin, TeamAndOrgViewSetMixin, viewsets.Mod
     )
     def list(self, request, *args, **kwargs):
         """List tickets with person data attached."""
-        queryset = self.filter_queryset(self.get_queryset())
-        page = self.paginate_queryset(queryset)
+        # _search_path starts as the class default (None) on each request's fresh
+        # viewset instance; filter_queryset sets it when a search filter is applied.
+        start = time.perf_counter()
+        try:
+            queryset = self.filter_queryset(self.get_queryset())
+            page = self.paginate_queryset(queryset)
 
-        if page is not None:
-            self._attach_persons_to_tickets(page)
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
+            if page is not None:
+                self._attach_persons_to_tickets(page)
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
 
-        tickets = list(queryset)
-        self._attach_persons_to_tickets(tickets)
-        serializer = self.get_serializer(tickets, many=True)
-        return Response(serializer.data)
+            tickets = list(queryset)
+            self._attach_persons_to_tickets(tickets)
+            serializer = self.get_serializer(tickets, many=True)
+            return Response(serializer.data)
+        finally:
+            if self._search_path is not None:
+                TICKET_SEARCH_DURATION_SECONDS.labels(search_path=self._search_path).observe(
+                    time.perf_counter() - start
+                )
 
     def retrieve(self, request, *args, **kwargs):
         """Get single ticket and mark as read by team."""

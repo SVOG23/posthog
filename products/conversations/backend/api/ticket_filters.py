@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from django.db.models import CharField, Exists, F, OrderBy, OuterRef, Q, QuerySet
+from django.db.models import CharField, F, OrderBy, Q, QuerySet
 from django.db.models.functions import Cast
 from django.utils import timezone
 
@@ -356,34 +356,36 @@ def _assignee_filter_q(entries: list[Any], user: User | None) -> Q:
     return assignee_q
 
 
-def _apply_search(queryset: QuerySet, search: str) -> QuerySet:
+def is_ticket_number_search(search: str) -> bool:
     # A leading "#" is how ticket numbers are shown in the UI (e.g. "#1234"), so
     # treat "#1234" the same as "1234" and match the ticket number exactly.
     # Restrict to ASCII digits: str.isdigit() also accepts characters like "²"
     # that int() then rejects, which would 500 the request.
-    ticket_number_search = search[1:] if search.startswith("#") else search
-    if ticket_number_search.isascii() and ticket_number_search.isdigit():
-        return queryset.filter(ticket_number=int(ticket_number_search))
+    ticket_number_search = search.removeprefix("#")
+    return ticket_number_search.isascii() and ticket_number_search.isdigit()
 
-    # EXISTS subquery: matches any comment in the ticket's conversation.
-    # Uses the (team_id, scope, item_id) composite index on Comment to
-    # narrow to per-ticket comments; EXISTS short-circuits on first match.
-    # If this becomes slow at scale (10k+ candidate tickets with broad
-    # filters), consider adding a GIN trigram index on Comment.content:
-    #   GinIndex(name="comment_content_trigram", fields=["content"],
-    #            opclasses=["gin_trgm_ops"])
+
+def _apply_search(queryset: QuerySet, search: str, team: Team) -> QuerySet:
+    if is_ticket_number_search(search):
+        return queryset.filter(ticket_number=int(search.removeprefix("#")))
+
+    # Comment match as a non-correlated subquery: self-contained, so Postgres hashes
+    # it once per query (scanning posthog_comment through its trigram index) instead
+    # of probing comments per ticket the way a correlated EXISTS would. The ticket id
+    # is cast to text rather than item_id to uuid — the id side is always a valid
+    # UUID, while a malformed item_id row would make the whole search error.
     comment_match = Comment.objects.filter(
-        team_id=OuterRef("team_id"),
+        team_id=team.id,
         scope="conversations_ticket",
-        item_id=Cast(OuterRef("id"), output_field=CharField()),
-        content__icontains=search,
         deleted=False,
-    )
-    return queryset.filter(
+        content__icontains=search,
+    ).values("item_id")
+
+    return queryset.alias(id_text=Cast("id", output_field=CharField())).filter(
         Q(anonymous_traits__name__icontains=search)
         | Q(anonymous_traits__email__icontains=search)
         | Q(email_subject__icontains=search)
-        | Exists(comment_match)
+        | Q(id_text__in=comment_match)
     )
 
 
@@ -460,6 +462,6 @@ def apply_ticket_filters(queryset: QuerySet, filters: Mapping[str, Any], *, team
 
     search = filters.get("search")
     if search and len(search) <= MAX_SEARCH_LENGTH:
-        queryset = _apply_search(queryset, search)
+        queryset = _apply_search(queryset, search, team)
 
     return queryset.order_by(*_sorting_to_order_expressions(filters.get("sorting")))
