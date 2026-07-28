@@ -56,7 +56,7 @@ from posthog.exceptions_capture import capture_exception
 from posthog.models import Team, User
 from posthog.models.activity_logging.activity_log import Change, Detail, log_activity
 from posthog.models.activity_logging.model_activity import is_impersonated_session
-from posthog.models.github_integration_base import GitHubIntegrationBase, NormalizedPRComment
+from posthog.models.github_integration_base import GitHubIntegrationBase
 from posthog.models.integration import GitHubIntegration, Integration
 from posthog.models.team.extensions import get_or_create_team_extension
 from posthog.models.user_integration import ReauthorizationRequired, UserGitHubIntegration, UserIntegration
@@ -86,6 +86,7 @@ from products.signals.backend.billing import (
     refund_ineligibility_reason,
     report_pr_is_merged,
 )
+from products.signals.backend.dismissal_notes import forward_dismissal_note
 from products.signals.backend.facade.api import emit_signal
 from products.signals.backend.implementation_pr import (
     fetch_implementation_pr_state_for_reports,
@@ -149,6 +150,7 @@ from products.signals.backend.temporal.deletion import SignalReportDeletionWorkf
 from products.signals.backend.temporal.grouping_v2 import TeamSignalGroupingV2Workflow
 from products.signals.backend.temporal.reingestion import SignalReportReingestionWorkflow
 from products.signals.backend.temporal.signal_queries import (
+    fetch_live_report_ids_for_source_ids,
     fetch_report_ids_for_scout_names,
     fetch_report_ids_for_source_products,
     fetch_signals_for_report_sync,
@@ -732,6 +734,7 @@ class SignalReportViewSet(
         qs = self._apply_signal_report_status_filter(qs)
         qs = self._apply_signal_report_search_filter(qs)
         qs = self._apply_signal_report_source_product_filter(qs)
+        qs = self._apply_signal_report_source_id_filter(qs)
         qs = self._apply_signal_report_scout_filter(qs)
         qs = self._apply_signal_report_implementation_pr_filter(qs)
         qs = self._apply_signal_report_suggested_reviewer_filter(qs)
@@ -847,6 +850,10 @@ class SignalReportViewSet(
         source_product_filter = self.request.query_params.get("source_product")
         if not source_product_filter:
             return queryset
+        # `source_id` already implies its product, so its narrower lookup subsumes this one. Skip
+        # rather than run a second ClickHouse query for a strictly wider set.
+        if self.request.query_params.get("source_id"):
+            return queryset
 
         source_products = [s.strip() for s in source_product_filter.split(",") if s.strip()]
         if not source_products:
@@ -854,6 +861,37 @@ class SignalReportViewSet(
 
         report_ids_with_source = fetch_report_ids_for_source_products(self.team, source_products)
         return queryset.filter(id__in=report_ids_with_source)
+
+    def _apply_signal_report_source_id_filter(self, queryset):
+        """Reports a specific source record contributed to, e.g. one support ticket's reports.
+
+        The owning product asks with the id it already has, instead of reaching into signals.
+
+        Requires a single `source_product`, because a source id is only unique within one: emitters
+        pass through the external system's own id, so GitHub issue 42 and Jira issue 42 both arrive as
+        `"42"`. `SignalEmissionRecord` says the same thing with its `(team, source_product, source_type,
+        source_id)` constraint. Without the product this would quietly mix products together.
+        """
+        source_id_filter = self.request.query_params.get("source_id")
+        if not source_id_filter:
+            return queryset
+
+        source_ids = [s.strip() for s in source_id_filter.split(",") if s.strip()]
+        if not source_ids:
+            return queryset
+
+        source_product = self.request.query_params.get("source_product")
+        product = source_product.strip() if source_product else ""
+        if not product or "," in product:
+            raise exceptions.ValidationError(
+                {
+                    "source_id": "Pass exactly one source_product alongside source_id. A source id is only "
+                    "unique within its product, so filtering without one would mix products together."
+                }
+            )
+        by_source = fetch_live_report_ids_for_source_ids(self.team, source_ids, product)
+        report_ids = {report_id for ids in by_source.values() for report_id in ids}
+        return queryset.filter(id__in=report_ids)
 
     def _apply_signal_report_scout_filter(self, queryset):
         scout_filter = self.request.query_params.get("scout")
@@ -1268,6 +1306,10 @@ class SignalReportViewSet(
             # `updated_at` is auto_now, but `update_fields` saves only the listed columns, so add it
             # explicitly to keep the edit timestamped.
             update_fields.append("updated_at")
+            # This text has not been through the safety judge, and the report's existing verdict was
+            # reached on the text this edit replaces. Marking the save retracts the report's embedding
+            # rather than indexing unreviewed content under a stale approval (see receivers.py).
+            report._unreviewed_edit = True  # type: ignore[attr-defined]
             with transaction.atomic():
                 report.save(update_fields=update_fields)
                 for content in edit_artefacts:
@@ -1322,6 +1364,18 @@ class SignalReportViewSet(
                 description=(
                     "Comma-separated list of source products to include. Reports are kept if at least one of "
                     "their contributing signals comes from one of these products (e.g. error_tracking, session_replay)."
+                ),
+            ),
+            OpenApiParameter(
+                name="source_id",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description=(
+                    "Comma-separated list of source record ids. Reports are kept if at least one of their "
+                    "contributing signals came from one of these records — e.g. pass a support ticket's UUID to "
+                    "see what the inbox already found for that ticket. Requires exactly one source_product, "
+                    "since a source id is only unique within its product."
                 ),
             ),
             OpenApiParameter(
@@ -1621,7 +1675,40 @@ class SignalReportViewSet(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        self._forward_dismissal_note(
+            reports=[report],
+            dismissal_reason=data.get("dismissal_reason"),
+            dismissal_note=data.get("dismissal_note"),
+        )
+
         return Response(SignalReportSerializer(report, context=self._enriched_report_context(report)).data)
+
+    def _forward_dismissal_note(
+        self,
+        *,
+        # `Sequence`, not `list`: this class defines a `list` action, which shadows the builtin for
+        # annotations evaluated in the class body at import time.
+        reports: Sequence[SignalReport],
+        dismissal_reason: str | None,
+        dismissal_note: str | None,
+    ) -> None:
+        """Leave the caller's dismissal note where scout runs actually read it.
+
+        Called once per request with every report that transitioned, so one note applied to a bulk
+        dismissal reaches each affected scout once instead of once per report. Runs after the
+        transitions have committed, because the note is derived context and the `dismissal` artefact
+        written alongside each transition remains the record of the feedback. Forwarding resolves
+        the reports' resulting status itself, drops the transitions this channel has nothing to say
+        about, and authorizes the caller against the scout-note write gates, so this call site only
+        hands it the request's principal.
+        """
+        forward_dismissal_note(
+            team=self.team,
+            reports=reports,
+            reason=dismissal_reason,
+            note=dismissal_note,
+            request=self.request,
+        )
 
     def _request_attribution(self) -> ArtefactAttribution:
         """Attribution for this request, resolved once and reused.
@@ -1802,6 +1889,7 @@ class SignalReportViewSet(
 
         results: list[dict] = []
         counts: dict[str, int] = {outcome.value: 0 for outcome in SignalReportBulkStateOutcome}
+        transitioned: list[SignalReport] = []
         for report_id in ordered_ids:
             report = reports_by_id.get(report_id)
             if report is None:
@@ -1817,6 +1905,8 @@ class SignalReportViewSet(
                     snooze_for=snooze_for,
                 )
                 report_status = report.status if outcome == SignalReportBulkStateOutcome.TRANSITIONED else None
+                if outcome == SignalReportBulkStateOutcome.TRANSITIONED:
+                    transitioned.append(report)
             results.append(
                 {
                     "id": report_id,
@@ -1826,6 +1916,12 @@ class SignalReportViewSet(
                 }
             )
             counts[outcome.value] += 1
+
+        self._forward_dismissal_note(
+            reports=transitioned,
+            dismissal_reason=dismissal_reason,
+            dismissal_note=dismissal_note,
+        )
 
         return Response(
             {
@@ -2228,9 +2324,7 @@ class SignalReportViewSet(
             return result
 
         self._bust_pr_comments_cache(repository, pr_number)
-        return Response(
-            {"comment": self._normalize_pr_review_comment(result["comment"])}, status=status.HTTP_201_CREATED
-        )
+        return self._pr_review_comment_response(result["comment"], status_code=status.HTTP_201_CREATED)
 
     @extend_schema(
         methods=["PATCH"],
@@ -2242,8 +2336,9 @@ class SignalReportViewSet(
                 description="The edited review comment, in the normalized PR-comment shape.",
             ),
             403: OpenApiResponse(description="No usable personal GitHub connection, or not the comment's author."),
-            404: OpenApiResponse(description="Report has no implementation PR."),
+            404: OpenApiResponse(description="Report has no implementation PR, or the comment isn't on it."),
             502: OpenApiResponse(description="GitHub rejected the edit."),
+            503: OpenApiResponse(description="The GitHub egress budget is temporarily unavailable."),
         },
         summary="Edit one of the requesting user's own review comments",
         operation_id="signals_report_pr_review_comment_update",
@@ -2254,8 +2349,9 @@ class SignalReportViewSet(
         responses={
             204: OpenApiResponse(description="Comment deleted."),
             403: OpenApiResponse(description="No usable personal GitHub connection, or not the comment's author."),
-            404: OpenApiResponse(description="Report has no implementation PR."),
+            404: OpenApiResponse(description="Report has no implementation PR, or the comment isn't on it."),
             502: OpenApiResponse(description="GitHub rejected the delete."),
+            503: OpenApiResponse(description="The GitHub egress budget is temporarily unavailable."),
         },
         summary="Delete one of the requesting user's own review comments",
         operation_id="signals_report_pr_review_comment_destroy",
@@ -2269,7 +2365,7 @@ class SignalReportViewSet(
     def pr_review_comment(self, request: Request, *args, **kwargs) -> Response:
         report = cast(SignalReport, self.get_object())
         comment_id = str(kwargs["comment_id"])
-        resolved = self._resolve_user_github_and_pr(report, cast(User, request.user))
+        resolved = self._resolve_user_github_and_pr(report, cast(User, request.user), comment_id=comment_id)
         if isinstance(resolved, Response):
             return resolved
         user_github, repository, pr_number = resolved
@@ -2290,7 +2386,7 @@ class SignalReportViewSet(
         self._bust_pr_comments_cache(repository, pr_number)
         if request.method == "DELETE":
             return Response(status=status.HTTP_204_NO_CONTENT)
-        return Response({"comment": self._normalize_pr_review_comment(result["comment"])})
+        return self._pr_review_comment_response(result["comment"], status_code=status.HTTP_200_OK)
 
     @extend_schema(
         request=PullRequestReviewCommentReactionCreateSerializer,
@@ -2300,8 +2396,9 @@ class SignalReportViewSet(
                 description="The created reaction.",
             ),
             403: OpenApiResponse(description="No usable personal GitHub connection."),
-            404: OpenApiResponse(description="Report has no implementation PR."),
+            404: OpenApiResponse(description="Report has no implementation PR, or the comment isn't on it."),
             502: OpenApiResponse(description="GitHub rejected the reaction."),
+            503: OpenApiResponse(description="The GitHub egress budget is temporarily unavailable."),
         },
         summary="React to a review comment as the requesting user",
         operation_id="signals_report_pr_review_comment_reactions_create",
@@ -2318,7 +2415,7 @@ class SignalReportViewSet(
         comment_id = str(kwargs["comment_id"])
         serializer = PullRequestReviewCommentReactionCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        resolved = self._resolve_user_github_and_pr(report, cast(User, request.user))
+        resolved = self._resolve_user_github_and_pr(report, cast(User, request.user), comment_id=comment_id)
         if isinstance(resolved, Response):
             return resolved
         user_github, repository, pr_number = resolved
@@ -2347,8 +2444,9 @@ class SignalReportViewSet(
         responses={
             204: OpenApiResponse(description="Reaction removed."),
             403: OpenApiResponse(description="No usable personal GitHub connection."),
-            404: OpenApiResponse(description="Report has no implementation PR."),
+            404: OpenApiResponse(description="Report has no implementation PR, or the comment isn't on it."),
             502: OpenApiResponse(description="GitHub rejected the removal."),
+            503: OpenApiResponse(description="The GitHub egress budget is temporarily unavailable."),
         },
         summary="Remove one of the requesting user's own reactions from a review comment",
         operation_id="signals_report_pr_review_comment_reaction_destroy",
@@ -2367,7 +2465,7 @@ class SignalReportViewSet(
         report = cast(SignalReport, self.get_object())
         comment_id = str(kwargs["comment_id"])
         reaction_id = str(kwargs["reaction_id"])
-        resolved = self._resolve_user_github_and_pr(report, cast(User, request.user))
+        resolved = self._resolve_user_github_and_pr(report, cast(User, request.user), comment_id=comment_id)
         if isinstance(resolved, Response):
             return resolved
         user_github, repository, pr_number = resolved
@@ -2547,18 +2645,28 @@ class SignalReportViewSet(
         cache.delete(f"signals:pr-github:{self.team.id}:{repository}:{pr_number}:get_pull_request_comments")
 
     @staticmethod
-    def _normalize_pr_review_comment(raw: dict[str, Any]) -> NormalizedPRComment:
+    def _pr_review_comment_response(raw: object, *, status_code: int) -> Response:
         """Shape a raw GitHub review comment via the shared read-path normalizer (a fresh write never
-        carries reactions)."""
+        carries reactions). The shared transport treats a body-less success as valid, so a write result
+        we can't normalize is an upstream failure rather than anything the caller did wrong."""
         normalized = GitHubIntegrationBase.normalize_pr_comment(raw, "review")
-        assert normalized is not None  # a write result always carries a dict comment
-        return normalized
+        if normalized is None:
+            return Response(
+                {"error": "GitHub returned the comment in an unexpected format. Reload to see the latest."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response({"comment": normalized}, status=status_code)
 
     def _resolve_user_github_and_pr(
-        self, report: SignalReport, user: User
+        self, report: SignalReport, user: User, *, comment_id: str | None = None
     ) -> tuple[UserGitHubIntegration, str, int] | Response:
         """Resolve the requesting user's personal GitHub integration and the report's PR, or a Response
-        error (404 no PR, 403 no personal GitHub connection) to return as-is."""
+        error (404 no PR, 403 no personal GitHub connection) to return as-is.
+
+        ``comment_id``, when given, is resolved and required to sit on the report's own PR. GitHub's
+        review-comment edit, delete, and reaction endpoints are repository-wide, so this is the only
+        thing keeping a report from reaching comments on every other PR in its repository.
+        """
         reference = self._resolve_report_pr_reference(report)
         if reference is None:
             return Response(
@@ -2575,7 +2683,25 @@ class SignalReportViewSet(
                 status=status.HTTP_403_FORBIDDEN,
             )
         repository, pr_number = reference
-        return UserGitHubIntegration(user_integration), repository, pr_number
+        user_github = UserGitHubIntegration(user_integration)
+        if comment_id is not None:
+            lookup = self._run_user_github_write(
+                lambda: user_github.get_pull_request_review_comment(repository, comment_id),
+                repository,
+                pr_number,
+                noun="comment",
+            )
+            if isinstance(lookup, Response):
+                return lookup
+            # Matched on the suffix, not the whole URL: the repository is already pinned by the path we
+            # just fetched, while the report's stored PR URL can differ from GitHub's canonical casing.
+            pull_request_url = (lookup.get("comment") or {}).get("pull_request_url")
+            if not isinstance(pull_request_url, str) or not pull_request_url.endswith(f"/pulls/{pr_number}"):
+                return Response(
+                    {"error": "This comment isn't on this report's pull request. Refresh the page and try again."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        return user_github, repository, pr_number
 
     def _run_user_github_write(
         self, fn: Callable[[], dict[str, Any]], repository: str, pr_number: int, *, noun: str
@@ -2857,6 +2983,14 @@ def append_suggested_reviewers(
                 if isinstance(prior_reason, str):
                     prior_reason_by_login[login] = prior_reason
 
+        # Newly-added reviewers carry no routing evidence, so record who added them and when
+        # (this path is always attributed to request.user). Dates use the report's project timezone.
+        actor = cast(User, request.user)
+        # Build the date without the platform-specific %-d directive (fails on non-Unix).
+        now_local = timezone.now().astimezone(team.timezone_info)
+        added_on = f"{now_local:%b} {now_local.day}, {now_local.year}"
+        manual_add_reason = f"Added as a reviewer by {actor.get_full_name().strip() or actor.email} on {added_on}"
+
         # Dedupe by canonical login, preserve first-seen order.
         new_content: list[dict] = []
         for login_lc, github_name, explicit_name, reason, explicit_reason in resolved_entries:
@@ -2865,9 +2999,12 @@ def append_suggested_reviewers(
             seen.add(login_lc)
             # If the client supplied github_name (incl. ""), honour it. Otherwise
             # carry over the prior one so kept reviewers don't lose their name.
-            # Same rule for reason.
+            # Same rule for reason. Only fall back to the manual-add note when the field was
+            # omitted for a brand-new reviewer — an explicit null clears the reason, as for kept ones.
             effective_name = github_name if explicit_name else prior_name_by_login.get(login_lc)
             effective_reason = reason if explicit_reason else prior_reason_by_login.get(login_lc)
+            if not explicit_reason and login_lc not in prior_logins:
+                effective_reason = manual_add_reason
             new_content.append(
                 {
                     "github_login": login_lc,

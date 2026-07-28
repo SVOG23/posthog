@@ -62,6 +62,49 @@ export const SignalReportStatusEnumApi = {
 } as const
 
 /**
+ * * `small` - small
+ * * `medium` - medium
+ * * `large` - large
+ */
+export type SizeEnumApi = (typeof SizeEnumApi)[keyof typeof SizeEnumApi]
+
+export const SizeEnumApi = {
+    Small: 'small',
+    Medium: 'medium',
+    Large: 'large',
+} as const
+
+/**
+ * One chart attached to a report — rendered in the inbox and referenceable from the summary.
+ */
+export interface ReportChartApi {
+    /**
+     * Stable slug for this chart within the report (lowercase letters, numbers, underscores, hyphens; must start with a letter or number). Reference it from `summary` as a markdown link with a `chart:` target — `[Daily signups](chart:signups-drop)` — to place the chart at that point in the body. A chart you don't reference still renders, below the summary.
+     * @maxLength 100
+     */
+    chart_id: string
+    /**
+     * Short heading shown above the chart.
+     * @maxLength 200
+     */
+    title: string
+    /** The query node to render. `kind` must be `InsightVizNode` (an ad-hoc product analytics chart), `DataVisualizationNode` (a SQL series — a `HogQLQuery` source plus a `display`), or `SavedInsightNode` (an existing insight by `shortId`). Pin the window to absolute dates where the node supports it, so the reader sees the data you wrote about rather than whatever a relative range resolves to when they open the report. */
+    query: unknown
+    /**
+     * Optional one-line note on what to look at in the chart.
+     * @maxLength 500
+     * @nullable
+     */
+    caption?: string | null
+    /** How much height the chart gets: `small` for a single number or a short series, `medium` for an ordinary graph, `large` when there are rows or a grid to read (retention, paths, a wide breakdown). Leave it out unless the default looks wrong — the inbox sizes a chart from its query, and two charts referenced from the same paragraph sit side by side.
+     *
+     * * `small` - small
+     * * `medium` - medium
+     * * `large` - large */
+    size?: SizeEnumApi | null
+}
+
+/**
  * * `pr_incorrect` - PR incorrect
  * * `pr_not_useful` - PR not useful
  * * `duplicate` - Duplicate
@@ -158,6 +201,8 @@ export interface SignalReportApi {
     readonly created_at: string
     readonly updated_at: string
     readonly artefact_count: number
+    /** Charts the report shows, in the order they were written. The summary places one with a `[label](chart:<chart_id>)` link; the rest render below it. */
+    readonly charts: readonly ReportChartApi[]
     /**
      * P0–P4 from the latest priority judgment artefact (when present).
      * @nullable
@@ -2142,6 +2187,8 @@ export interface ScoutNoteApi {
      * @nullable
      */
     created_by_name: string | null
+    /** Where the note came from: `human` for one left directly through this API, or `report_dismissal` for one forwarded from the note someone typed when they dismissed, snoozed, or restored one or more inbox reports. A `report_dismissal` note is one reviewer's verdict on the reports its content names, so weigh it as evidence about those reports rather than as fleet-level steering. */
+    origin: string
 }
 
 /**
@@ -2271,6 +2318,50 @@ export interface EmitEligibilityApi {
      * @nullable
      */
     remediation: string | null
+}
+
+/**
+ * One scout in either bucket of `inventory.scout_fleet`.
+ */
+export interface ScoutFleetEntryApi {
+    /** The `signals-scout-*` skill this config schedules. */
+    skill_name: string
+    /** Minutes between runs when no cron schedule is set (default 1440, every 24 hours). */
+    run_interval_minutes: number
+    /**
+     * Optional cron expression, evaluated in the project timezone. Takes precedence over the interval.
+     * @nullable
+     */
+    run_cron_schedule: string | null
+    /** Whether this scout's findings actually reach the inbox. False means dry-run: it runs and logs but emits nothing, so its silence says nothing about the surface it watches. */
+    emit: boolean
+    /**
+     * ISO-8601 timestamp the coordinator last dispatched this scout, or null if it has never run.
+     * @nullable
+     */
+    last_run_at: string | null
+    /**
+     * ISO-8601 timestamp this scout last produced output on either channel (a finding, or an authored/edited report), within `emitted_lookback_days`. Null means quiet for at least that window, not never.
+     * @nullable
+     */
+    last_emitted_at: string | null
+    /**
+     * Why this scout is in the `disabled` bucket: `turned_off` (an operator set it off) or `skill_unavailable` (left on, but its skill was deleted, superseded, or withheld, so it never dispatches). Null for scouts that actually run.
+     * @nullable
+     */
+    not_running_reason: string | null
+}
+
+/**
+ * `inventory.scout_fleet` — the other scouts running on this project, split by enablement.
+ */
+export interface ScoutFleetApi {
+    /** Scouts that actually run on this team: enabled, with a live skill the coordinator dispatches. */
+    enabled: ScoutFleetEntryApi[]
+    /** Scouts that do not run, each carrying a `not_running_reason` — turned off, or left on with a skill that can't dispatch. Different from a surface no scout ever covered. */
+    disabled: ScoutFleetEntryApi[]
+    /** The window `last_emitted_at` was resolved over, so a null reads as 'quiet', not 'never'. */
+    emitted_lookback_days: number
 }
 
 /**
@@ -2714,6 +2805,8 @@ export interface ProjectProfileInventoryApi {
     signal_source_configs: SignalSourceConfigsBucketsApi
     /** Whether scout findings can actually reach the inbox for this team — the org-level AI data-processing consent gate and the `signals_scout` source toggle, plus a one-line remediation pointer. Read at cold start to quick-close before doing throwaway work. */
     emit_eligibility: EmitEligibilityApi
+    /** The other scouts configured on this project, split into enabled / disabled, each with its cadence, dry-run posture, last run, and last emit. Read it to see who else is watching this project before investigating a surface a sibling already covers. */
+    scout_fleet: ScoutFleetApi
     /** Counts of reports already in the inbox, grouped by status. */
     existing_inbox_reports: ExistingInboxReportsApi
     /** Per-scope counts off the activity log over the recent-activity window — cross-cutting orientation across every entity type (surveys, feature flags, experiments, dashboards, insights, cohorts, notebooks, actions, etc.). Each scope reports `edits` (total log entries), `users` (distinct user count), and `last_edit` (ISO-8601). Use to triage which scope a team has been working in lately before drilling down via the per-entity readers or `advanced-activity-logs-list`. */
@@ -2997,6 +3090,11 @@ export interface EditReportRequestApi {
      * @maxItems 10
      */
     suggested_reviewers?: SuggestedReviewerApi[]
+    /**
+     * The full set of charts the report should show. Replaces the report's charts rather than adding to them, the way `summary` replaces the summary — so send every chart you want kept. Omit the field to leave the report's existing charts untouched.
+     * @maxItems 20
+     */
+    charts?: ReportChartApi[]
 }
 
 export interface EditReportResponseApi {
@@ -3008,6 +3106,8 @@ export interface EditReportResponseApi {
     note_appended: boolean
     /** Whether the report's suggested reviewers were replaced. */
     reviewers_set: boolean
+    /** How many charts the report now shows, or 0 if charts were untouched. */
+    charts_set: number
 }
 
 /**
@@ -3178,6 +3278,11 @@ export interface EmitReportRequestApi {
      * @maxItems 10
      */
     suggested_reviewers?: SuggestedReviewerApi[]
+    /**
+     * Optional charts to attach to the report — the inbox renders them inline, so a metric move is something the reader sees rather than a number they take on trust. Attach one whenever the finding rests on a trend, a spike, or a comparison you already queried.
+     * @maxItems 20
+     */
+    charts?: ReportChartApi[]
 }
 
 export interface EmitReportResponseApi {
@@ -3669,6 +3774,10 @@ export type SignalsReportsListParams = {
      * Case-insensitive substring match against report title and summary.
      */
     search?: string
+    /**
+     * Comma-separated list of source record ids. Reports are kept if at least one of their contributing signals came from one of these records — e.g. pass a support ticket's UUID to see what the inbox already found for that ticket. Requires exactly one source_product, since a source id is only unique within its product.
+     */
+    source_id?: string
     /**
      * Comma-separated list of source products to include. Reports are kept if at least one of their contributing signals comes from one of these products (e.g. error_tracking, session_replay).
      */
