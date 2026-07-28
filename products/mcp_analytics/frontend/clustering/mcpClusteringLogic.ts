@@ -110,8 +110,8 @@ export interface mcpClusteringLogicValues {
     sortedTools: MCPToolPivotApi[]
     spreadRoutes: number
     toolColumns: string[]
-    toolSearch: string
     toolOverlaps: readonly MCPToolOverlapApi[]
+    toolSearch: string
     toolSortKey: ToolSortKey
     tools: readonly MCPToolPivotApi[]
     topErrorRoute: MCPIntentClusterApi | null
