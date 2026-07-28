@@ -178,6 +178,7 @@ export interface RoleLookupResponseApi {
  * * `meta-ads` - Meta Ads
  * * `pinterest-ads` - Pinterest Ads
  * * `postgresql` - Postgresql
+ * * `posthog` - Posthog
  * * `reddit-ads` - Reddit Ads
  * * `resend` - Resend
  * * `s3-compatible` - S3 Compatible
@@ -223,6 +224,7 @@ export const IntegrationKindEnumApi = {
     MetaAds: 'meta-ads',
     PinterestAds: 'pinterest-ads',
     Postgresql: 'postgresql',
+    Posthog: 'posthog',
     RedditAds: 'reddit-ads',
     Resend: 'resend',
     S3Compatible: 's3-compatible',
@@ -459,6 +461,7 @@ export interface IntegrationAccessRequestApi {
      * * `meta-ads` - Meta Ads
      * * `pinterest-ads` - Pinterest Ads
      * * `postgresql` - Postgresql
+     * * `posthog` - Posthog
      * * `reddit-ads` - Reddit Ads
      * * `resend` - Resend
      * * `s3-compatible` - S3 Compatible
@@ -549,6 +552,7 @@ export type IntegrationsListParams = {
      * * `meta-ads` - Meta Ads
      * * `pinterest-ads` - Pinterest Ads
      * * `postgresql` - Postgresql
+     * * `posthog` - Posthog
      * * `reddit-ads` - Reddit Ads
      * * `resend` - Resend
      * * `s3-compatible` - S3 Compatible
@@ -605,6 +609,7 @@ export const IntegrationsListKind = {
     MetaAds: 'meta-ads',
     PinterestAds: 'pinterest-ads',
     Postgresql: 'postgresql',
+    Posthog: 'posthog',
     RedditAds: 'reddit-ads',
     Resend: 'resend',
     S3Compatible: 's3-compatible',

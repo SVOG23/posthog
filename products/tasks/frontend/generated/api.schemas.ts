@@ -2839,9 +2839,10 @@ export const JsonrpcEnumApi = {
  * * `set_config_option` - set_config_option
  * * `mcp_response` - mcp_response
  */
-export type MethodEnumApi = (typeof MethodEnumApi)[keyof typeof MethodEnumApi]
+export type TaskRunCommandRequestMethodEnumApi =
+    (typeof TaskRunCommandRequestMethodEnumApi)[keyof typeof TaskRunCommandRequestMethodEnumApi]
 
-export const MethodEnumApi = {
+export const TaskRunCommandRequestMethodEnumApi = {
     UserMessage: 'user_message',
     Cancel: 'cancel',
     Close: 'close',
@@ -2866,7 +2867,7 @@ export interface TaskRunCommandRequestApi {
      * * `permission_response` - permission_response
      * * `set_config_option` - set_config_option
      * * `mcp_response` - mcp_response */
-    method: MethodEnumApi
+    method: TaskRunCommandRequestMethodEnumApi
     /** Parameters for the command */
     params?: TaskRunCommandRequestApiParams
     /** Optional JSON-RPC request ID (string or number) */
