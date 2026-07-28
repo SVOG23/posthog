@@ -1,3 +1,4 @@
+import uuid
 from email.utils import make_msgid
 from typing import Any, cast
 
@@ -599,12 +600,12 @@ def post_github_reply_on_team_message(sender, instance: Comment, created: bool, 
 # ---------------------------------------------------------------------------
 
 
-def _recompute_ticket_tags(ticket_id: str) -> None:
+def _recompute_ticket_tags(ticket_id: uuid.UUID) -> None:
     tag_names = sorted(TaggedItem.objects.filter(ticket_id=ticket_id).values_list("tag__name", flat=True))
     Ticket.objects.filter(id=ticket_id).update(tag_names=tag_names)
 
 
-def _apply_ticket_assignee(ticket_id: str, user_id: int | None, role_id: object | None) -> None:
+def _apply_ticket_assignee(ticket_id: uuid.UUID, user_id: int | None, role_id: uuid.UUID | None) -> None:
     role_name = Role.objects.filter(id=role_id).values_list("name", flat=True).first() if role_id else None
     Ticket.objects.filter(id=ticket_id).update(
         assignee_user_id=user_id,
