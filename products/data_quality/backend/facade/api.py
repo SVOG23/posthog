@@ -6,9 +6,20 @@ logic surface and model classes so the isolation boundary stays clean: presentat
 into ``logic`` or ``models`` directly.
 """
 
+from ..logic.checks import (
+    checks_for_subject,
+    ensure_name_available,
+    soft_delete_check,
+    start_check_suite,
+    subject_health,
+    update_check,
+    upsert_check,
+    validate_check,
+)
 from ..logic.compiler import compile_check, related_subject_ref
 from ..logic.contracts import CheckPlan, CompiledCheck, Evaluation, SubjectRef
 from ..logic.errors import CheckConfigError, SubjectUnresolvableError
+from ..logic.health import CheckStatusRow, roll_up_health
 from ..logic.registry import UnknownCheckTypeError, all_specs, get_spec
 from ..logic.serialization import compute_fingerprint, from_config_entry, to_config_entry
 from ..logic.spec import CheckConfig, CheckTypeSpec
@@ -19,6 +30,7 @@ __all__ = [
     "CheckConfig",
     "CheckConfigError",
     "CheckPlan",
+    "CheckStatusRow",
     "CheckTypeSpec",
     "CompiledCheck",
     "DataQualityCheck",
@@ -29,11 +41,20 @@ __all__ = [
     "SubjectUnresolvableError",
     "UnknownCheckTypeError",
     "all_specs",
+    "checks_for_subject",
     "compile_check",
     "compute_fingerprint",
+    "ensure_name_available",
     "from_config_entry",
     "get_spec",
     "related_subject_ref",
     "resolve_subject",
+    "roll_up_health",
+    "soft_delete_check",
+    "start_check_suite",
+    "subject_health",
     "to_config_entry",
+    "update_check",
+    "upsert_check",
+    "validate_check",
 ]

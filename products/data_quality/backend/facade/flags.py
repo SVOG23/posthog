@@ -1,0 +1,9 @@
+"""Feature-flag re-export.
+
+Lets core code (the HogQL database builder) check the product flag without pulling the facade's
+heavier logic surface onto its import path.
+"""
+
+from ..logic.flags import DATA_QUALITY_CHECKS_FEATURE_FLAG, is_data_quality_checks_enabled
+
+__all__ = ["DATA_QUALITY_CHECKS_FEATURE_FLAG", "is_data_quality_checks_enabled"]
