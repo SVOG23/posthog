@@ -99,7 +99,13 @@ ticket_assignments: _TicketScopedPostgresTable = _TicketScopedPostgresTable(
             name="user_id", nullable=True, description="User the ticket is assigned to, if assigned to a user."
         ),
         "role_id": UUIDDatabaseField(
-            name="role_id", nullable=True, description="Role the ticket is assigned to, if assigned to a role."
+            name="role_id",
+            nullable=True,
+            description=(
+                "Role the ticket is assigned to, if assigned to a role. Match it with "
+                "role_id IN (SELECT id FROM system.support_ticket_roles WHERE name = '...'); joining on it "
+                "directly needs assumeNotNull(role_id), because ClickHouse rejects a nullable join key."
+            ),
         ),
     },
 )
