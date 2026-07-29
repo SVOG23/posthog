@@ -84,7 +84,13 @@ rules:
                               |BatchImport
                               |BriefConfig
                               |ButtonTile
+                              |Canvas
+                              |CanvasBuild
+                              |CanvasSourceVersion
                               |ChangeRequest
+                              |ChannelContextGeneration
+                              |ChannelInstructions
+                              |ChannelStar
                               |ClusteringConfig
                               |ClusteringJob
                               |Cohort
@@ -408,7 +414,13 @@ rules:
                         |BatchImport
                         |BriefConfig
                         |ButtonTile
+                        |Canvas
+                        |CanvasBuild
+                        |CanvasSourceVersion
                         |ChangeRequest
+                        |ChannelContextGeneration
+                        |ChannelInstructions
+                        |ChannelStar
                         |ClusteringConfig
                         |ClusteringJob
                         |Cohort
