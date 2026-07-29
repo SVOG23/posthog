@@ -17,8 +17,9 @@ from posthog.hogql.query import execute_hogql_query
 from posthog.clickhouse.query_tagging import Feature, Product, tags_context
 from posthog.models.scoping import team_scope
 from posthog.models.team import Team
+from posthog.models.user import User
 
-from ..facade.enums import CheckRunStatus, CheckSeverity, SubjectStatus
+from ..facade.enums import CheckRunStatus, CheckSeverity, SubjectStatus, SuiteRunTrigger
 from ..models import DataQualityCheck, DataQualityCheckRun, DataQualitySuiteRun
 from .compiler import compile_check, related_subject_ref
 from .contracts import CompiledCheck, Evaluation
@@ -51,7 +52,7 @@ def run_check(check: DataQualityCheck, suite_run: DataQualitySuiteRun, team: Tea
     previous_status = check.last_status
 
     try:
-        outcome = _execute(check, team)
+        outcome = _execute(check, team, _authorizing_user(suite_run))
     except Exception as err:
         outcome = CheckOutcome(status=CheckRunStatus.ERRORED, error=str(err))
 
@@ -70,7 +71,23 @@ def run_check(check: DataQualityCheck, suite_run: DataQualitySuiteRun, team: Tea
     return replace(outcome, became_failing=became_failing)
 
 
-def _execute(check: DataQualityCheck, team: Team) -> CheckOutcome:
+def _authorizing_user(suite_run: DataQualitySuiteRun) -> User | None:
+    """The user a manual run's query must execute as, so HogQL enforces their warehouse access.
+
+    A ``custom_sql`` check runs arbitrary HogQL that isn't constrained to its declared subject, so a
+    user who was denied a warehouse table or view could otherwise wrap it in a check and read a
+    failing-row count over it. Running a manual run's query as its initiator closes that: HogQL
+    applies the user's warehouse ACL, and a denied object errors the check instead of leaking.
+
+    Scheduled and materialization runs have no actor to authorize against, so they keep the
+    service-level bypass -- without it every check over a warehouse object errors once the flag is on.
+    """
+    if suite_run.trigger != SuiteRunTrigger.MANUAL:
+        return None
+    return suite_run.created_by
+
+
+def _execute(check: DataQualityCheck, team: Team, run_as: User | None) -> CheckOutcome:
     subject = resolve_subject(team.id, check.subject_type, check.subject_uuid)
     if not subject.exists:
         check.subject_status = SubjectStatus.ORPHANED
@@ -88,13 +105,15 @@ def _execute(check: DataQualityCheck, team: Team) -> CheckOutcome:
         related_subject=resolve_subject(team.id, *related) if related else None,
     )
     with tags_context(product=Product.DATA_CATALOG, feature=Feature.ENRICHMENT):
-        # No user out here to authorize against, so warehouse access control has nobody to check;
-        # bypass it, or every check over a warehouse table or view errors once that flag is on.
+        # Manual runs execute as their initiator so HogQL enforces that user's warehouse access;
+        # actorless runs (schedule, materialization) bypass it, or every check over a warehouse
+        # table or view errors once that flag is on.
         response = execute_hogql_query(
             query=compiled.query,
             team=team,
             query_type=QUERY_TYPE,
-            bypass_warehouse_access_control=True,
+            user=run_as,
+            bypass_warehouse_access_control=run_as is None,
         )
     return _interpret(compiled, check.config, response.results, response.columns or [])
 

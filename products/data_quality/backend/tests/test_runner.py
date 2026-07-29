@@ -120,14 +120,28 @@ class TestCheckRunner(BaseTest):
         assert run.status == CheckRunStatus.PASSED
         assert run.observed_value == 42.0
 
-    def test_the_check_query_bypasses_warehouse_access_control(self) -> None:
-        # The runner has no user to authorize, so it must bypass warehouse access control; without
-        # it every check over a warehouse table or view errors once that flag is enabled.
+    @parameterized.expand(
+        [
+            # A manual run executes as its initiator so HogQL enforces that user's warehouse access:
+            # a custom_sql check can't reach an object its author was denied.
+            ("manual_with_user", SuiteRunTrigger.MANUAL, True, False),
+            # No actor to authorize against, so the bypass stays -- otherwise every warehouse check errors.
+            ("manual_without_user", SuiteRunTrigger.MANUAL, False, True),
+            ("schedule_ignores_creator", SuiteRunTrigger.SCHEDULE, True, True),
+        ]
+    )
+    def test_warehouse_access_control_is_enforced_only_for_user_initiated_runs(
+        self, _name, trigger: SuiteRunTrigger, with_user: bool, expected_bypass: bool
+    ) -> None:
+        suite_run = DataQualitySuiteRun.objects.for_team(self.team.id).create(
+            team=self.team, trigger=trigger, created_by=self.user if with_user else None
+        )
         check = self._check()
         with patch(RUNNER_QUERY, return_value=_Response(["failure_count", "observed_value"], [0, 0])) as query:
-            run_check(check, self.suite_run, self.team)
+            run_check(check, suite_run, self.team)
 
-        assert query.call_args.kwargs["bypass_warehouse_access_control"] is True
+        assert query.call_args.kwargs["bypass_warehouse_access_control"] is expected_bypass
+        assert query.call_args.kwargs["user"] == (None if expected_bypass else self.user)
 
     @parameterized.expand(
         [
