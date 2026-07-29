@@ -8,10 +8,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common imp
 
 @config.config
 class EbaySourceConfig(config.Config):
-    client_id: str
-    client_secret: str
-    refresh_token: str
-    environment: Literal["production", "sandbox"] = config.value(default="production")
+    ebay_integration_id: int = config.value(converter=config.str_to_int)
     marketplace_id: Literal[
         "EBAY_US",
         "EBAY_GB",

@@ -6,10 +6,7 @@ from products.warehouse_sources.backend.types import IncrementalField, Increment
 
 # eBay serves every marketplace from one host; the marketplace is selected with the
 # X-EBAY-C-MARKETPLACE-ID header rather than a regional hostname.
-EBAY_HOSTS: dict[str, str] = {
-    "production": "https://api.ebay.com",
-    "sandbox": "https://api.sandbox.ebay.com",
-}
+EBAY_API_HOST = "https://api.ebay.com"
 
 # Sell APIs cap a single `filter` date range at 90 days, so historical backfills are
 # walked as a series of 90-day windows.

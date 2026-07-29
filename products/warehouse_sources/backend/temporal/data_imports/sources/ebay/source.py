@@ -1,3 +1,4 @@
+import functools
 from typing import Optional, cast
 
 from posthog.schema import (
@@ -5,8 +6,7 @@ from posthog.schema import (
     ExternalDataSourceType as SchemaExternalDataSourceType,
     ReleaseStatus,
     SourceConfig,
-    SourceFieldInputConfig,
-    SourceFieldInputConfigType,
+    SourceFieldOauthConfig,
     SourceFieldSelectConfig,
     SourceFieldSelectConfigOption,
 )
@@ -19,6 +19,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.bas
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.canonical_descriptions import (
     CanonicalDescriptions,
 )
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.mixins import OAuthMixin
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.registry import SourceRegistry
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import SourceSchema
@@ -28,9 +29,23 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay 
     ebay_source,
     validate_credentials as validate_ebay_credentials,
 )
+from products.warehouse_sources.backend.temporal.data_imports.sources.ebay.oauth import resolve_ebay_oauth_token
 from products.warehouse_sources.backend.temporal.data_imports.sources.ebay.settings import ENDPOINTS, INCREMENTAL_FIELDS
 from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.ebay import EbaySourceConfig
 from products.warehouse_sources.backend.types import ExternalDataSourceType
+
+# Every scope the source calls, in the space-separated form eBay's `scope` parameter uses. The
+# frontend diffs it against what the seller actually granted and offers a reconnect when it falls
+# short. `commerce.identity.readonly` is what names the connected account.
+REQUIRED_SCOPES = " ".join(
+    [
+        "https://api.ebay.com/oauth/api_scope",
+        "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+        "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+        "https://api.ebay.com/oauth/api_scope/sell.finances",
+        "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+    ]
+)
 
 MARKETPLACES: list[tuple[str, str]] = [
     ("EBAY_US", "United States"),
@@ -54,7 +69,7 @@ MARKETPLACES: list[tuple[str, str]] = [
 
 
 @SourceRegistry.register
-class EbaySource(ResumableSource[EbaySourceConfig, EbayResumeConfig]):
+class EbaySource(ResumableSource[EbaySourceConfig, EbayResumeConfig], OAuthMixin):
     api_docs_url = "https://developer.ebay.com/api-docs/static/ebay-rest-landing.html"
 
     lists_tables_without_credentials = True  # static endpoint catalog — safe for public docs
@@ -69,15 +84,16 @@ class EbaySource(ResumableSource[EbaySourceConfig, EbayResumeConfig]):
             name=SchemaExternalDataSourceType.EBAY,
             category=DataWarehouseSourceCategory.E_COMMERCE,
             label="eBay",
-            caption="""Pull your eBay seller data — orders, monetary transactions, payouts and inventory — into the PostHog Data warehouse.
+            caption="""Pull your eBay seller data into the PostHog Data warehouse: orders, monetary transactions, payouts and inventory.
 
-Seller data is only readable with a user token, so you need an eBay developer application and a one-time authorization from the selling account:
+Connect the eBay account that does the selling, then pick the marketplace it sells on. eBay will ask you to let PostHog view:
 
-1. Create an application keyset in the [eBay developer program](https://developer.ebay.com/my/keys) and copy its **App ID (client ID)** and **Cert ID (client secret)**.
-2. Run eBay's authorization code flow for the selling account and exchange the code for a **refresh token**. Grant the `sell.fulfillment.readonly`, `sell.finances` and `sell.inventory.readonly` scopes.
-3. Paste all three values below, then pick the marketplace the account sells on.
+- your order fulfillments
+- your payments and payouts
+- your inventory and offers
+- your basic account information, which is used to name the connection
 
-Refresh tokens last 18 months, but eBay revokes them when the seller changes their password. Reconnect here if syncs start failing.""",
+eBay expires the connection after 18 months, and revokes it when the seller changes their password. Reconnect here if syncs start failing.""",
             iconPath="/static/services/ebay.png",
             docsUrl="https://posthog.com/docs/cdp/sources/ebay",
             releaseStatus=ReleaseStatus.ALPHA,
@@ -85,39 +101,12 @@ Refresh tokens last 18 months, but eBay revokes them when the seller changes the
             fields=cast(
                 list[FieldType],
                 [
-                    SourceFieldSelectConfig(
-                        name="environment",
-                        label="Environment",
+                    SourceFieldOauthConfig(
+                        name="ebay_integration_id",
+                        label="eBay account",
                         required=True,
-                        defaultValue="production",
-                        options=[
-                            SourceFieldSelectConfigOption(label="Production", value="production"),
-                            SourceFieldSelectConfigOption(label="Sandbox", value="sandbox"),
-                        ],
-                    ),
-                    SourceFieldInputConfig(
-                        name="client_id",
-                        label="App ID (client ID)",
-                        type=SourceFieldInputConfigType.TEXT,
-                        required=True,
-                        placeholder="",
-                        secret=False,
-                    ),
-                    SourceFieldInputConfig(
-                        name="client_secret",
-                        label="Cert ID (client secret)",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="",
-                        secret=True,
-                    ),
-                    SourceFieldInputConfig(
-                        name="refresh_token",
-                        label="Refresh token",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="v^1.1#...",
-                        secret=True,
+                        kind="ebay",
+                        requiredScopes=REQUIRED_SCOPES,
                     ),
                     SourceFieldSelectConfig(
                         name="marketplace_id",
@@ -134,27 +123,33 @@ Refresh tokens last 18 months, but eBay revokes them when the seller changes the
 
     def get_non_retryable_errors(self) -> dict[str, str | None]:
         return {
-            "400 Client Error: Bad Request for url: https://api.ebay.com/identity/v1/oauth2/token": (
-                "eBay rejected your refresh token. It may have expired or been revoked. Reauthorize the selling "
-                "account and paste the new refresh token."
-            ),
-            "401 Client Error: Unauthorized for url: https://api.ebay.com/identity/v1/oauth2/token": (
-                "eBay rejected your App ID or Cert ID. Check the keyset in your eBay developer account and reconnect."
-            ),
             "401 Client Error: Unauthorized for url: https://api.ebay.com": (
-                "Your eBay authorization is no longer valid. Reauthorize the selling account and paste the new "
-                "refresh token."
+                "Your eBay connection is no longer valid. Reconnect your eBay account and try again."
             ),
             "403 Client Error: Forbidden for url: https://api.ebay.com": (
-                "Your eBay authorization is missing the scope needed for this data. Reauthorize the selling account "
-                "granting sell.fulfillment.readonly, sell.finances and sell.inventory.readonly, then reconnect."
+                "Your eBay connection is missing the permission needed for this data. Reconnect your eBay account "
+                "and allow access to your order fulfillments, payments and payouts, and inventory."
             ),
+            # Deterministic credential errors from OAuthMixin and the token resolver: the integration
+            # row is gone or unusable, so a retry can never succeed. Matched on the stable prefix so
+            # the volatile integration ID is ignored.
+            "Missing integration ID": "Your eBay account is not connected. Reconnect it and try again.",
+            "Integration not found": "The linked eBay connection no longer exists. Reconnect your eBay account.",
+            "eBay access token not found": "Your eBay connection has no access token. Reconnect your eBay account.",
         }
 
     def get_retryable_errors(self) -> set[str]:
         # The tracked transport already backs off on eBay's per-app call limit before giving
         # up, so a surfaced 429 is transient rather than a failure worth alerting on.
         return {"429 Client Error"}
+
+    def _access_token(self, config: EbaySourceConfig, team_id: int) -> str:
+        """Current access token for the connected eBay account, refreshed if it has expired."""
+        integration_id = config.ebay_integration_id
+        # Ownership check first: a missing or foreign integration is a stable ValueError rather
+        # than the DoesNotExist the token resolver would raise, which retries would never fix.
+        self.get_oauth_integration(integration_id, team_id)
+        return resolve_ebay_oauth_token(integration_id, team_id)
 
     def get_canonical_descriptions(self) -> CanonicalDescriptions:
         from products.warehouse_sources.backend.temporal.data_imports.sources.ebay.canonical_descriptions import (  # noqa: PLC0415
@@ -195,36 +190,41 @@ Refresh tokens last 18 months, but eBay revokes them when the seller changes the
         schema_name: Optional[str] = None,
         api_version: str | None = None,
     ) -> tuple[bool, str | None]:
+        try:
+            access_token = self._access_token(config, team_id)
+        except ValueError:
+            return False, "Connect an eBay account to continue"
+
         is_valid, is_forbidden = validate_ebay_credentials(
-            environment=config.environment,
-            client_id=config.client_id,
-            client_secret=config.client_secret,
-            refresh_token=config.refresh_token,
+            access_token=access_token,
             marketplace_id=config.marketplace_id,
             schema_name=schema_name,
         )
         if is_valid:
             return True, None
 
-        # A 403 means the token is genuine but that scope wasn't granted. Sellers commonly
-        # authorize only the APIs they want, so accept it at source-create and reject it
-        # only when validating a specific table.
+        # A 403 means the connection is genuine but that permission wasn't granted. Sellers
+        # commonly authorize only the APIs they want, so accept it at source-create and reject
+        # it only when validating a specific table.
         if is_forbidden and schema_name is None:
             return True, None
 
         if is_forbidden:
-            return False, f"Your eBay authorization is missing the scope required to sync '{schema_name}'"
+            return False, f"Your eBay connection is missing the permission required to sync '{schema_name}'"
 
-        return False, "Invalid eBay credentials"
+        return False, "Your eBay connection is invalid or expired. Reconnect it and try again."
 
     def get_endpoint_permissions(
         self, config: EbaySourceConfig, team_id: int, endpoints: list[str], api_version: str | None = None
     ) -> dict[str, str | None]:
+        try:
+            access_token = self._access_token(config, team_id)
+        except ValueError:
+            # Never block the schema picker on a credential problem; validate_credentials reports it.
+            return dict.fromkeys(endpoints)
+
         return check_ebay_endpoint_permissions(
-            environment=config.environment,
-            client_id=config.client_id,
-            client_secret=config.client_secret,
-            refresh_token=config.refresh_token,
+            access_token=access_token,
             marketplace_id=config.marketplace_id,
             endpoints=endpoints,
         )
@@ -240,12 +240,12 @@ Refresh tokens last 18 months, but eBay revokes them when the seller changes the
         resumable_source_manager: ResumableSourceManager[EbayResumeConfig],
         inputs: SourceInputs,
     ) -> SourceResponse:
+        integration_id = config.ebay_integration_id
         return ebay_source(
-            environment=config.environment,
-            client_id=config.client_id,
-            client_secret=config.client_secret,
-            refresh_token=config.refresh_token,
+            access_token=self._access_token(config, inputs.team_id),
             marketplace_id=config.marketplace_id,
+            # eBay access tokens last two hours, so a long backfill re-mints mid-sync.
+            token_refresher=functools.partial(resolve_ebay_oauth_token, integration_id, inputs.team_id),
             endpoint=inputs.schema_name,
             logger=inputs.logger,
             resumable_source_manager=resumable_source_manager,

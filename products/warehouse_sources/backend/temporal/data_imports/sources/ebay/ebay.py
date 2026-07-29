@@ -1,6 +1,5 @@
-import base64
 import dataclasses
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Optional
 
@@ -12,23 +11,21 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.htt
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.ebay.settings import (
     DEFAULT_BACKFILL_DAYS,
+    EBAY_API_HOST,
     EBAY_ENDPOINTS,
-    EBAY_HOSTS,
     INCREMENTAL_OVERLAP_SECONDS,
     MAX_FILTER_WINDOW_DAYS,
     EbayEndpointConfig,
 )
 
-OAUTH_TOKEN_PATH = "/identity/v1/oauth2/token"
 REQUEST_TIMEOUT_SECONDS = 60
 
 # One filter window, expressed as (start, end). `None` marks an endpoint with no date
 # filter, which is walked as a single unfiltered pass.
 Window = Optional[tuple[datetime, datetime]]
 
-
-class EbayAuthenticationError(Exception):
-    pass
+# Called with the token that was just rejected; returns a currently valid one.
+TokenRefresher = Callable[[str], str]
 
 
 @dataclasses.dataclass
@@ -40,13 +37,6 @@ class EbayResumeConfig:
     offset: int = 0
     # Offset into the parent listing for fan-out endpoints (offers walk inventory items).
     parent_offset: int = 0
-
-
-def host_for_environment(environment: str) -> str:
-    host = EBAY_HOSTS.get(environment)
-    if host is None:
-        raise ValueError(f"Invalid eBay environment: {environment}")
-    return host
 
 
 def format_datetime(value: datetime) -> str:
@@ -122,54 +112,29 @@ def window_key(window: Window) -> Optional[str]:
 
 
 class EbayClient:
-    """Bearer-token eBay Sell API client that re-mints the short-lived user access token.
+    """Bearer-token eBay Sell API client.
 
-    eBay user access tokens last two hours, which a large backfill can outlive, so a 401
-    is treated as an expiry once per request before it is surfaced as an error.
+    eBay user access tokens last two hours, which a large backfill can outlive. When the
+    caller supplies a refresher, a 401 is treated as an expiry once per request and the
+    token is re-minted through the integration before the error is surfaced.
     """
 
     def __init__(
         self,
-        host: str,
-        client_id: str,
-        client_secret: str,
-        refresh_token: str,
+        access_token: str,
         marketplace_id: str,
         logger: Optional[FilteringBoundLogger] = None,
+        token_refresher: Optional[TokenRefresher] = None,
     ) -> None:
-        self._host = host
-        self._client_id = client_id
-        self._client_secret = client_secret
-        self._refresh_token = refresh_token
         self._marketplace_id = marketplace_id
         self._logger = logger
-        self._session = make_tracked_session(redact_values=(client_secret, refresh_token))
-        # The token exchange body carries both the refresh token and a freshly minted
-        # access token, neither of which the name-based scrubbers recognise.
-        self._auth_session = make_tracked_session(redact_values=(client_secret, refresh_token), capture=False)
-        self._token: Optional[str] = None
-
-    def mint_token(self) -> str:
-        credentials = base64.b64encode(f"{self._client_id}:{self._client_secret}".encode()).decode()
-        response = self._auth_session.post(
-            f"{self._host}{OAUTH_TOKEN_PATH}",
-            data={"grant_type": "refresh_token", "refresh_token": self._refresh_token},
-            headers={
-                "Authorization": f"Basic {credentials}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        token = response.json().get("access_token")
-        if not token:
-            raise EbayAuthenticationError("eBay did not return an access token for the supplied refresh token")
-        self._token = str(token)
-        return self._token
+        self._token_refresher = token_refresher
+        self._token = access_token
+        # The token only ever rides the Authorization header, which the tracked transport
+        # already redacts by name, so it needs no extra `redact_values` entry.
+        self._session = make_tracked_session()
 
     def _headers(self) -> dict[str, str]:
-        if self._token is None:
-            self.mint_token()
         return {
             "Authorization": f"Bearer {self._token}",
             "Accept": "application/json",
@@ -177,11 +142,11 @@ class EbayClient:
         }
 
     def get(self, path: str, params: dict[str, str], allow_not_found: bool = False) -> dict[str, Any]:
-        url = f"{self._host}{path}"
+        url = f"{EBAY_API_HOST}{path}"
         response = self._session.get(url, params=params, headers=self._headers(), timeout=REQUEST_TIMEOUT_SECONDS)
 
-        if response.status_code == 401:
-            self._token = None
+        if response.status_code == 401 and self._token_refresher is not None:
+            self._token = self._token_refresher(self._token)
             response = self._session.get(url, params=params, headers=self._headers(), timeout=REQUEST_TIMEOUT_SECONDS)
 
         # getOffers answers 404 for a SKU that has no offers yet, which is an empty result
@@ -198,24 +163,16 @@ class EbayClient:
 
 
 def validate_credentials(
-    environment: str,
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token: str,
     marketplace_id: str,
     schema_name: Optional[str] = None,
 ) -> tuple[bool, bool]:
-    """Probe eBay to confirm the OAuth credentials work.
+    """Probe eBay to confirm the connected account works.
 
     Returns ``(is_valid, is_forbidden)``. ``is_forbidden`` separates a 403 (the token is
-    real but the grant is missing the scope for this resource) from a 401 or a failed
-    token exchange, so the caller can accept scope gaps at source-create time.
+    real but the grant is missing the scope for this resource) from a 401 or an unreachable
+    API, so the caller can accept scope gaps at source-create time.
     """
-    try:
-        host = host_for_environment(environment)
-    except ValueError:
-        return False, False
-
     config = EBAY_ENDPOINTS.get(schema_name) if schema_name else None
     if config is None:
         config = EBAY_ENDPOINTS["orders"]
@@ -223,12 +180,7 @@ def validate_credentials(
     if config.parent is not None:
         config = EBAY_ENDPOINTS[config.parent]
 
-    client = EbayClient(host, client_id, client_secret, refresh_token, marketplace_id)
-    try:
-        client.mint_token()
-    except Exception:
-        return False, False
-
+    client = EbayClient(access_token, marketplace_id)
     try:
         client.get(config.path, {"limit": "1"})
     except requests.HTTPError as e:
@@ -241,24 +193,17 @@ def validate_credentials(
 
 
 def check_endpoint_permissions(
-    environment: str,
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token: str,
     marketplace_id: str,
     endpoints: list[str],
 ) -> dict[str, Optional[str]]:
-    """Probe each endpoint with one shared token. ``None`` = reachable, else the reason.
+    """Probe each endpoint with the connected account. ``None`` = reachable, else the reason.
 
     Only a 403 counts as a scope problem — a throttle, 5xx or network blip leaves the table
     reachable so it is retried at sync time rather than reported as a permission error.
     """
     permissions: dict[str, Optional[str]] = dict.fromkeys(endpoints)
-    try:
-        client = EbayClient(host_for_environment(environment), client_id, client_secret, refresh_token, marketplace_id)
-        client.mint_token()
-    except Exception:
-        return permissions
+    client = EbayClient(access_token, marketplace_id)
 
     for endpoint in endpoints:
         config = EBAY_ENDPOINTS.get(endpoint)
@@ -367,22 +312,18 @@ def _fanout_rows(
 
 
 def get_rows(
-    environment: str,
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token: str,
     marketplace_id: str,
     endpoint: str,
     logger: FilteringBoundLogger,
     resumable_source_manager: ResumableSourceManager[EbayResumeConfig],
+    token_refresher: Optional[TokenRefresher] = None,
     should_use_incremental_field: bool = False,
     db_incremental_field_last_value: Any = None,
     incremental_field: Optional[str] = None,
 ) -> Iterator[list[dict[str, Any]]]:
     config = EBAY_ENDPOINTS[endpoint]
-    client = EbayClient(
-        host_for_environment(environment), client_id, client_secret, refresh_token, marketplace_id, logger
-    )
+    client = EbayClient(access_token, marketplace_id, logger, token_refresher)
     resume = resumable_source_manager.load_state() if resumable_source_manager.can_resume() else None
 
     if config.parent is not None:
@@ -406,14 +347,12 @@ def get_rows(
 
 
 def ebay_source(
-    environment: str,
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token: str,
     marketplace_id: str,
     endpoint: str,
     logger: FilteringBoundLogger,
     resumable_source_manager: ResumableSourceManager[EbayResumeConfig],
+    token_refresher: Optional[TokenRefresher] = None,
     should_use_incremental_field: bool = False,
     db_incremental_field_last_value: Any = None,
     incremental_field: Optional[str] = None,
@@ -423,14 +362,12 @@ def ebay_source(
     return SourceResponse(
         name=endpoint,
         items=lambda: get_rows(
-            environment=environment,
-            client_id=client_id,
-            client_secret=client_secret,
-            refresh_token=refresh_token,
+            access_token=access_token,
             marketplace_id=marketplace_id,
             endpoint=endpoint,
             logger=logger,
             resumable_source_manager=resumable_source_manager,
+            token_refresher=token_refresher,
             should_use_incremental_field=should_use_incremental_field,
             db_incremental_field_last_value=db_incremental_field_last_value,
             incremental_field=incremental_field,

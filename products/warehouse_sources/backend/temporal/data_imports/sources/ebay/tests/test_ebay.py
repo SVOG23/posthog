@@ -1,5 +1,5 @@
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Optional, cast
 
@@ -12,7 +12,6 @@ from parameterized import parameterized
 
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay import (
-    EbayAuthenticationError,
     EbayClient,
     EbayResumeConfig,
     build_windows,
@@ -21,7 +20,6 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay 
     ebay_source,
     format_datetime,
     get_rows,
-    host_for_environment,
     resolve_filter_field,
     validate_credentials,
 )
@@ -48,10 +46,6 @@ def _response(status_code: int = 200, json_data: Any = None) -> MagicMock:
         requests.HTTPError(f"{status_code} Client Error", response=response) if status_code >= 400 else None
     )
     return response
-
-
-def _token_response(token: str = "tok-1") -> MagicMock:
-    return _response(200, {"access_token": token, "expires_in": 7200, "token_type": "User Access Token"})
 
 
 class _FakeManager(ResumableSourceManager[EbayResumeConfig]):
@@ -81,12 +75,6 @@ class _FakeSession:
     def __init__(self, pages: Optional[dict[str, list[MagicMock]]] = None) -> None:
         self.pages = pages or {}
         self.gets: list[dict[str, Any]] = []
-        self.posts: list[dict[str, Any]] = []
-        self.token_response = _token_response()
-
-    def post(self, url: str, **kwargs: Any) -> MagicMock:
-        self.posts.append({"url": url, **kwargs})
-        return self.token_response
 
     def get(self, url: str, **kwargs: Any) -> MagicMock:
         params = kwargs.get("params") or {}
@@ -125,10 +113,7 @@ def _run(
     ):
         batches = list(
             get_rows(
-                environment="production",
-                client_id="app-id",
-                client_secret="cert-id",
-                refresh_token="refresh",
+                access_token="tok-1",
                 marketplace_id="EBAY_US",
                 endpoint=endpoint,
                 logger=MagicMock(),
@@ -176,11 +161,6 @@ class TestHelpers:
         else:
             assert result is not None
             assert result.astimezone(UTC) == expected
-
-    def test_host_for_environment_rejects_unknown(self) -> None:
-        assert host_for_environment("sandbox") == "https://api.sandbox.ebay.com"
-        with pytest.raises(ValueError):
-            host_for_environment("staging")
 
     @parameterized.expand(
         [
@@ -250,44 +230,48 @@ class TestBuildWindows:
 
 
 class TestEbayClient:
-    def _client(self, session: _FakeSession) -> EbayClient:
+    def _client(
+        self, session: _FakeSession, token_refresher: Optional[Callable[[str], str]] = None, token: str = "tok-1"
+    ) -> EbayClient:
         with patch(
             "products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay.make_tracked_session",
             return_value=session,
         ):
-            return EbayClient(PROD_HOST, "app-id", "cert-id", "refresh", "EBAY_US", MagicMock())
+            return EbayClient(token, "EBAY_US", MagicMock(), token_refresher)
 
-    def test_token_exchange_uses_basic_auth_and_the_refresh_grant(self) -> None:
-        session = _FakeSession()
-        client = self._client(session)
-        assert client.mint_token() == "tok-1"
-        post = session.posts[0]
-        assert post["url"] == f"{PROD_HOST}/identity/v1/oauth2/token"
-        assert post["data"] == {"grant_type": "refresh_token", "refresh_token": "refresh"}
-        # base64("app-id:cert-id")
-        assert post["headers"]["Authorization"] == "Basic YXBwLWlkOmNlcnQtaWQ="
-
-    def test_token_response_without_a_token_is_an_error(self) -> None:
-        session = _FakeSession()
-        session.token_response = _response(200, {"expires_in": 7200})
-        client = self._client(session)
-        with pytest.raises(EbayAuthenticationError):
-            client.mint_token()
+    def test_the_connections_token_is_sent_as_a_bearer(self) -> None:
+        session = _FakeSession({"/sell/fulfillment/v1/order": [_page("orders", [])]})
+        self._client(session).get("/sell/fulfillment/v1/order", {})
+        assert session.gets[0]["headers"]["Authorization"] == "Bearer tok-1"
 
     def test_expired_token_is_reminted_once_mid_sync(self) -> None:
         # User access tokens last two hours, which a large backfill outlives; a 401 must
-        # refresh the token rather than fail the job.
+        # refresh through the integration rather than fail the job.
         session = _FakeSession({"/sell/fulfillment/v1/order": [_response(401), _page("orders", [{"orderId": "1"}])]})
-        client = self._client(session)
+        refreshed: list[str] = []
+
+        def refresher(current: str) -> str:
+            refreshed.append(current)
+            return "tok-2"
+
+        client = self._client(session, refresher)
         assert client.get("/sell/fulfillment/v1/order", {}) == {"orders": [{"orderId": "1"}]}
-        assert len(session.posts) == 2
-        assert session.gets[1]["headers"]["Authorization"] == "Bearer tok-1"
+        assert refreshed == ["tok-1"]
+        assert session.gets[1]["headers"]["Authorization"] == "Bearer tok-2"
 
     def test_repeated_401_is_surfaced(self) -> None:
         session = _FakeSession({"/sell/fulfillment/v1/order": [_response(401), _response(401)]})
+        client = self._client(session, lambda _current: "tok-2")
+        with pytest.raises(requests.HTTPError):
+            client.get("/sell/fulfillment/v1/order", {})
+
+    def test_401_without_a_refresher_is_surfaced_immediately(self) -> None:
+        # Validation probes have no refresher; a 401 there is a bad connection, not an expiry.
+        session = _FakeSession({"/sell/fulfillment/v1/order": [_response(401), _page("orders", [])]})
         client = self._client(session)
         with pytest.raises(requests.HTTPError):
             client.get("/sell/fulfillment/v1/order", {})
+        assert len(session.gets) == 1
 
     @parameterized.expand([("allowed", True, {}), ("not_allowed", False, None)])
     def test_404_handling(self, _name: str, allow_not_found: bool, expected: Optional[dict[str, Any]]) -> None:
@@ -447,7 +431,7 @@ class TestValidateCredentials:
             "products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay.make_tracked_session",
             return_value=session,
         ):
-            return validate_credentials("production", "app-id", "cert-id", "refresh", "EBAY_US", schema_name)
+            return validate_credentials("tok-1", "EBAY_US", schema_name)
 
     @parameterized.expand(
         [
@@ -462,18 +446,6 @@ class TestValidateCredentials:
         page = _page("orders", []) if status == 200 else _response(status)
         assert self._validate(_FakeSession({"/sell/fulfillment/v1/order": [page]})) == expected
 
-    def test_failed_token_exchange_is_invalid(self) -> None:
-        session = _FakeSession()
-        session.token_response = _response(400, {"error": "invalid_grant"})
-        assert self._validate(session) == (False, False)
-
-    def test_unknown_environment_is_invalid(self) -> None:
-        with patch(
-            "products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay.make_tracked_session",
-            return_value=_FakeSession(),
-        ):
-            assert validate_credentials("staging", "app-id", "cert-id", "refresh", "EBAY_US") == (False, False)
-
     def test_fanout_schema_probes_its_parent_listing(self) -> None:
         # getOffers needs a SKU we don't have at validation time, so the parent is probed.
         session = _FakeSession({"/sell/inventory/v1/inventory_item": [_page("inventory_items", [])]})
@@ -487,7 +459,7 @@ class TestCheckEndpointPermissions:
             "products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay.make_tracked_session",
             return_value=session,
         ):
-            return check_endpoint_permissions("production", "app-id", "cert-id", "refresh", "EBAY_US", endpoints)
+            return check_endpoint_permissions("tok-1", "EBAY_US", endpoints)
 
     def test_only_a_denial_is_reported_as_a_missing_scope(self) -> None:
         # A throttle or 5xx is transient — reporting it as a scope gap would push users to
@@ -503,12 +475,11 @@ class TestCheckEndpointPermissions:
         assert result["orders"] is None
         assert result["transactions"] is not None
         assert result["payouts"] is None
-        # One token is minted for the whole check, not one per endpoint.
-        assert len(session.posts) == 1
 
-    def test_a_failed_token_exchange_leaves_every_endpoint_reachable(self) -> None:
-        session = _FakeSession()
-        session.token_response = _response(401)
+    def test_an_unusable_connection_leaves_every_endpoint_reachable(self) -> None:
+        # A 401 is a connection problem that validate_credentials reports; flagging every table
+        # as permission-denied here would be misleading.
+        session = _FakeSession(dict.fromkeys((EBAY_ENDPOINTS[e].path for e in ENDPOINTS), [_response(401)]))
         assert self._check(session, list(ENDPOINTS)) == dict.fromkeys(ENDPOINTS)
 
 
@@ -517,10 +488,7 @@ class TestEbaySourceResponse:
     def test_response_matches_the_endpoint_settings(self, endpoint: str) -> None:
         config = EBAY_ENDPOINTS[endpoint]
         response = ebay_source(
-            environment="production",
-            client_id="app-id",
-            client_secret="cert-id",
-            refresh_token="refresh",
+            access_token="tok-1",
             marketplace_id="EBAY_US",
             endpoint=endpoint,
             logger=MagicMock(),
@@ -545,10 +513,7 @@ class TestEbaySourceResponse:
             return_value=session,
         ):
             response = ebay_source(
-                environment="production",
-                client_id="app-id",
-                client_secret="cert-id",
-                refresh_token="refresh",
+                access_token="tok-1",
                 marketplace_id="EBAY_US",
                 endpoint="orders",
                 logger=MagicMock(),
