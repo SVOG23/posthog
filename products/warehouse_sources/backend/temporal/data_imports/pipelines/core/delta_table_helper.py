@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 from django.conf import settings
+from django.db import InterfaceError, OperationalError
 
 import numpy as np
 import pyarrow as pa
@@ -69,6 +70,19 @@ TRANSIENT_OBJECT_STORE_ERRORS = (
 
 def is_transient_object_store_error(error: BaseException) -> bool:
     return isinstance(error, OSError) and any(needle in str(error) for needle in TRANSIENT_OBJECT_STORE_ERRORS)
+
+
+def is_transient_maintenance_error(error: BaseException) -> bool:
+    """Infra blips seen during pre-write maintenance that aren't a maintenance bug.
+
+    Covers S3/object-store hiccups reaching our own data-warehouse bucket (see
+    `is_transient_object_store_error` above), and app-DB connection blips (DNS, pooler drops) hit while
+    resolving `job.folder_path()` on a pooled connection — the same `OperationalError`/`InterfaceError`
+    classification used for this failure class in `repartition_table.py`'s `_is_transient_infra_error`.
+    """
+    if isinstance(error, OperationalError | InterfaceError):
+        return True
+    return is_transient_object_store_error(error)
 
 
 # A merge's conflict checker raises CommitFailedError the moment a concurrent commit added data
