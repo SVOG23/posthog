@@ -136,6 +136,7 @@ import {
     getDashboardWidgetType,
     getInsightWithRetry,
     isLayoutEditEventSource,
+    isRefreshRejectionStub,
     layoutsByTile,
     parseURLFilters,
     parseURLVariables,
@@ -3525,7 +3526,7 @@ export const dashboardLogic = kea<dashboardLogicType>([
                     true
                 )
 
-                if (refreshedInsight) {
+                if (refreshedInsight && !isRefreshRejectionStub(refreshedInsight)) {
                     dashboardsModel.actions.updateDashboardInsight(refreshedInsight, undefined, dashboardId)
                     actions.setRefreshStatus(insight.short_id)
                 } else {
@@ -3621,7 +3622,7 @@ export const dashboardLogic = kea<dashboardLogicType>([
                             tile.filters_overrides
                         )
 
-                        if (refreshedInsight) {
+                        if (refreshedInsight && !isRefreshRejectionStub(refreshedInsight)) {
                             dashboardsModel.actions.updateDashboardInsight(refreshedInsight, undefined, dashboardId)
                             actions.setRefreshStatus(insight.short_id)
                             tilesRefreshedCount++
