@@ -3032,6 +3032,10 @@ class AssistantDataVisualizationChartSettings(BaseModel):
     )
     showLegend: bool | None = Field(default=None, description="Show the chart legend.")
     showNullsAsZero: bool | None = Field(default=None, description="Replace null aggregation results with zero.")
+    showTotalRow: bool | None = Field(
+        default=None,
+        description=("Show a total summing all Y series. Applies to line, bar, and area charts."),
+    )
     showValuesOnSeries: bool | None = Field(
         default=None,
         description="Render each data point's value as a label directly on the series.",
@@ -3059,7 +3063,6 @@ class AssistantDataVisualizationTableSettings(BaseModel):
         description=("Columns to display and their order. Omit to show every column returned by the query."),
     )
     pinnedColumns: list[str] | None = Field(default=None, description="Column names to pin to the left of the table.")
-    showTotalRow: bool | None = Field(default=None, description="Show a total row at the bottom of the table.")
     transpose: bool | None = Field(default=None, description="Transpose rows and columns.")
 
 
@@ -13583,6 +13586,10 @@ class ChartSettings(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
+    chartStyle: ChartStyle | None = Field(
+        default=None,
+        description=("Chart rendering style overrides (line shape). Only applies to line and area charts."),
+    )
     goalLines: list[GoalLine] | None = None
     heatmap: HeatmapSettings | None = None
     leftYAxisSettings: YAxisSettings | None = None
@@ -13628,6 +13635,28 @@ class ConversionGoalFilter1(BaseModel):
     )
     conversion_goal_id: str
     conversion_goal_name: str
+    counts_as_customer: bool | None = Field(
+        default=None,
+        description=(
+            "Marks this goal as customer-defining: a conversion here means the person"
+            " became a customer (e.g. a payment or subscription), not an intermediate"
+            " step like a sign up. It gates customer-based metrics such as CAC and"
+            " LTV:CAC, whose denominator is new customers (counted once per person via"
+            " first_time_for_user) rather than every conversion. Defaults to false."
+        ),
+    )
+    counts_as_revenue: bool | None = Field(
+        default=None,
+        description=(
+            "Marks this goal as revenue-bearing: the value of a conversion is a"
+            " monetary amount, not a count or an arbitrary numeric property. It gates"
+            " revenue metrics such as ROAS and LTV:CAC. The amount itself comes from"
+            " math_property, and its currency from math_property_revenue_currency, the"
+            " same shape Revenue analytics uses for revenue events. Independent of"
+            " counts_as_customer: a purchase is usually both, a trial signup neither."
+            " Defaults to false."
+        ),
+    )
     custom_name: str | None = None
     event: str | None = Field(default=None, description="The event or `null` for all events.")
     fixedProperties: list[AnyPropertyFilterDiscriminated] | None = Field(
@@ -13670,6 +13699,28 @@ class ConversionGoalFilter2(BaseModel):
     )
     conversion_goal_id: str
     conversion_goal_name: str
+    counts_as_customer: bool | None = Field(
+        default=None,
+        description=(
+            "Marks this goal as customer-defining: a conversion here means the person"
+            " became a customer (e.g. a payment or subscription), not an intermediate"
+            " step like a sign up. It gates customer-based metrics such as CAC and"
+            " LTV:CAC, whose denominator is new customers (counted once per person via"
+            " first_time_for_user) rather than every conversion. Defaults to false."
+        ),
+    )
+    counts_as_revenue: bool | None = Field(
+        default=None,
+        description=(
+            "Marks this goal as revenue-bearing: the value of a conversion is a"
+            " monetary amount, not a count or an arbitrary numeric property. It gates"
+            " revenue metrics such as ROAS and LTV:CAC. The amount itself comes from"
+            " math_property, and its currency from math_property_revenue_currency, the"
+            " same shape Revenue analytics uses for revenue events. Independent of"
+            " counts_as_customer: a purchase is usually both, a trial signup neither."
+            " Defaults to false."
+        ),
+    )
     custom_name: str | None = None
     fixedProperties: list[AnyPropertyFilterDiscriminated] | None = Field(
         default=None,
@@ -13710,6 +13761,28 @@ class ConversionGoalFilter3(BaseModel):
     )
     conversion_goal_id: str
     conversion_goal_name: str
+    counts_as_customer: bool | None = Field(
+        default=None,
+        description=(
+            "Marks this goal as customer-defining: a conversion here means the person"
+            " became a customer (e.g. a payment or subscription), not an intermediate"
+            " step like a sign up. It gates customer-based metrics such as CAC and"
+            " LTV:CAC, whose denominator is new customers (counted once per person via"
+            " first_time_for_user) rather than every conversion. Defaults to false."
+        ),
+    )
+    counts_as_revenue: bool | None = Field(
+        default=None,
+        description=(
+            "Marks this goal as revenue-bearing: the value of a conversion is a"
+            " monetary amount, not a count or an arbitrary numeric property. It gates"
+            " revenue metrics such as ROAS and LTV:CAC. The amount itself comes from"
+            " math_property, and its currency from math_property_revenue_currency, the"
+            " same shape Revenue analytics uses for revenue events. Independent of"
+            " counts_as_customer: a purchase is usually both, a trial signup neither."
+            " Defaults to false."
+        ),
+    )
     custom_name: str | None = None
     distinct_id_field: str
     dw_source_type: str | None = None
@@ -24850,6 +24923,7 @@ class LogsQuery(BaseModel):
     modifiers: HogQLQueryModifiers | None = Field(default=None, description="Modifiers used when performing the query")
     offset: int | None = None
     orderBy: LogsOrderBy | None = None
+    personId: str | None = Field(default=None, description="Show logs for a given person")
     resourceFingerprint: str | None = None
     response: LogsQueryResponse | None = None
     searchTerm: str | None = None
