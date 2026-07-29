@@ -77306,6 +77306,11 @@ export namespace Schemas {
      * @minLength 1
      */
     name?: string;
+    /**
+     * Only count metrics produced by this version of the object's config, e.g. one published version of a workflow. Omit to count every version. Supported where the producer records the version it ran; otherwise this returns no data.
+     * @minimum 1
+     */
+    version?: number;
     };
 
     export type HogFlowsMetricsRetrieveBreakdownBy = typeof HogFlowsMetricsRetrieveBreakdownBy[keyof typeof HogFlowsMetricsRetrieveBreakdownBy];
@@ -77368,6 +77373,11 @@ export namespace Schemas {
      * @minLength 1
      */
     name?: string;
+    /**
+     * Only count metrics produced by this version of the object's config, e.g. one published version of a workflow. Omit to count every version. Supported where the producer records the version it ran; otherwise this returns no data.
+     * @minimum 1
+     */
+    version?: number;
     };
 
     export type HogFlowsMetricsTotalsRetrieveBreakdownBy = typeof HogFlowsMetricsTotalsRetrieveBreakdownBy[keyof typeof HogFlowsMetricsTotalsRetrieveBreakdownBy];
@@ -77536,6 +77546,11 @@ export namespace Schemas {
      * @minLength 1
      */
     name?: string;
+    /**
+     * Only count metrics produced by this version of the object's config, e.g. one published version of a workflow. Omit to count every version. Supported where the producer records the version it ran; otherwise this returns no data.
+     * @minimum 1
+     */
+    version?: number;
     };
 
     export type HogFunctionsMetricsRetrieveBreakdownBy = typeof HogFunctionsMetricsRetrieveBreakdownBy[keyof typeof HogFunctionsMetricsRetrieveBreakdownBy];
@@ -77598,6 +77613,11 @@ export namespace Schemas {
      * @minLength 1
      */
     name?: string;
+    /**
+     * Only count metrics produced by this version of the object's config, e.g. one published version of a workflow. Omit to count every version. Supported where the producer records the version it ran; otherwise this returns no data.
+     * @minimum 1
+     */
+    version?: number;
     };
 
     export type HogFunctionsMetricsTotalsRetrieveBreakdownBy = typeof HogFunctionsMetricsTotalsRetrieveBreakdownBy[keyof typeof HogFunctionsMetricsTotalsRetrieveBreakdownBy];

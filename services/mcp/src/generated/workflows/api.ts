@@ -790,6 +790,13 @@ export const HogFlowsMetricsRetrieveQueryParams = /* @__PURE__ */ zod.object({
         ),
     kind: zod.string().min(1).optional().describe("Comma-separated metric kinds to filter by, e.g. 'success,failure'."),
     name: zod.string().min(1).optional().describe('Comma-separated metric names to filter by.'),
+    version: zod
+        .number()
+        .min(1)
+        .optional()
+        .describe(
+            "Only count metrics produced by this version of the object's config, e.g. one published version of a workflow. Omit to count every version. Supported where the producer records the version it ran; otherwise this returns no data."
+        ),
 })
 
 export const HogFlowsPublishCreateParams = /* @__PURE__ */ zod.object({
