@@ -9279,6 +9279,18 @@ export namespace Schemas {
       is_bot: boolean;
     }
 
+    /**
+     * * `no_output` - No output
+     * * `ignored` - Output ignored
+     */
+    export type AutoPauseReasonEnum = typeof AutoPauseReasonEnum[keyof typeof AutoPauseReasonEnum];
+
+
+    export const AutoPauseReasonEnum = {
+      NoOutput: 'no_output',
+      Ignored: 'ignored',
+    } as const;
+
     export type AutocompleteCompletionItemKind = typeof AutocompleteCompletionItemKind[keyof typeof AutocompleteCompletionItemKind];
 
 
@@ -52863,6 +52875,8 @@ export namespace Schemas {
       run_cron_schedule?: string | null;
       /** Destinations that receive each finding or report this scout emits. Pass an empty object to disable delivery. */
       output_destinations?: SignalScoutOutputDestinations;
+      /** Exempt this scout from the inactivity pause. Set it on watchdog scouts whose value is staying quiet, so silence is never read as waste. */
+      auto_pause_exempt?: boolean;
     }
 
     export interface PatchedSignalSourceConfig {
@@ -62292,6 +62306,23 @@ export namespace Schemas {
          * @nullable
          */
       readonly last_run_at: string | null;
+      /**
+         * When this scout was paused for inactivity, after a warning period in which it still surfaced nothing anyone engaged with. Null unless it was auto-paused. Set `enabled` back to true to resume it — that clears the pause.
+         * @nullable
+         */
+      readonly auto_paused_at: string | null;
+      /** Why this scout was paused for inactivity. Null unless it was auto-paused.
+       *
+       * * `no_output` - No output
+       * * `ignored` - Output ignored */
+      readonly auto_pause_reason: AutoPauseReasonEnum | null;
+      /**
+         * When the inactivity sweep first found this scout producing nothing. It pauses a grace period later unless it surfaces something in the meantime. Null when it isn't at risk.
+         * @nullable
+         */
+      readonly auto_pause_warned_at: string | null;
+      /** Whether this scout is exempt from the inactivity pause. Set it on watchdog scouts whose value is staying quiet, so silence is never read as waste. */
+      readonly auto_pause_exempt: boolean;
       readonly created_at: string;
     }
 
@@ -62314,6 +62345,8 @@ export namespace Schemas {
       run_interval_minutes?: number;
       /** Destinations that receive each finding or report this scout emits. Empty by default. */
       output_destinations?: SignalScoutOutputDestinations;
+      /** Exempt this scout from the inactivity pause, which otherwise switches off a scout that goes a fortnight without surfacing anything anyone engages with. Set it on watchdog scouts whose value is staying quiet. Defaults to false. */
+      auto_pause_exempt?: boolean;
       /**
          * Optional five-field cron expression, e.g. '30 9 * * *' (daily at 09:30), '0 9,17 * * *' (twice daily), or '0 9 * * 1-5' (weekday mornings). Evaluated in the project timezone. Takes precedence over `run_interval_minutes`; occurrences must be at least 30 minutes apart.
          * @maxLength 100
@@ -62343,6 +62376,8 @@ export namespace Schemas {
       run_interval_minutes?: number;
       /** Destinations that receive each finding or report this scout emits. Empty by default. */
       output_destinations?: SignalScoutOutputDestinations;
+      /** Exempt this scout from the inactivity pause, which otherwise switches off a scout that goes a fortnight without surfacing anything anyone engages with. Set it on watchdog scouts whose value is staying quiet. Defaults to false. */
+      auto_pause_exempt?: boolean;
       /**
          * Optional five-field cron expression, e.g. '30 9 * * *' (daily at 09:30), '0 9,17 * * *' (twice daily), or '0 9 * * 1-5' (weekday mornings). Evaluated in the project timezone. Takes precedence over `run_interval_minutes`; occurrences must be at least 30 minutes apart.
          * @maxLength 100
