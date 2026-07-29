@@ -21,13 +21,13 @@ from posthog.utils import get_machine_id
 from products.data_warehouse.backend.facade.api import aget_s3_client, ensure_bucket_exists
 from products.warehouse_sources.backend.models.external_data_job import ExternalDataJob
 from products.warehouse_sources.backend.temporal.data_imports.naming_convention import NamingConvention
-from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.consts import PARTITION_KEY
-from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.utils import (
+from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.arrow_utils import (
     align_incoming_decimals_to_delta,
     conditional_lru_cache_async,
     normalize_column_name,
     pyarrow_schema_from_arrow_exportable,
 )
+from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.consts import PARTITION_KEY
 
 # A pre-write defensive compact fires when EITHER threshold is exceeded.
 #
@@ -605,6 +605,13 @@ class DeltaTableHelper:
                     storage_options=storage_options,
                     partition_by=PARTITION_KEY if use_partitioning else None,
                 )
+            else:
+                # An append re-casts each source column to its stored type, same as a merge. A decimal
+                # column that outgrew decimal128 arrives here as text (decimal256 renders to string),
+                # and delta-rs can't parse the scientific notation arrow emits for scale-heavy zeros
+                # (e.g. '0E-18') back into the stored decimal — an opaque DeltaError that retries
+                # forever. Align to the stored decimal types up front, exactly as the merge path does.
+                data = align_incoming_decimals_to_delta(data, delta_table.schema())
 
             await self._logger.adebug(f"write_to_deltalake: write_type = append")
 

@@ -14,14 +14,17 @@ import deltalake
 import pyarrow.compute as pc
 from parameterized import parameterized
 
-from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.consts import PARTITION_KEY
-from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.delta_table_helper import (
+from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.arrow_utils import (
+    SchemaColumnTypeChangedException,
+    evolve_pyarrow_schema,
+)
+from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.consts import PARTITION_KEY
+from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta_table_helper import (
     DeltaTableHelper,
     _delta_merge_spill_kwargs,
     _first_per_pk_table,
     _realign_decimal_buffers,
 )
-from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.utils import evolve_pyarrow_schema
 
 
 def _decimal_array(values: list, *, precision: int = 10, scale: int = 2, misaligned: bool) -> pa.Array:
@@ -155,7 +158,7 @@ class TestStorageOptionsCommitSafety:
                 DATA_WAREHOUSE_DELTA_S3_ALLOW_UNSAFE_RENAME=allow_unsafe,
             ),
             patch(
-                "products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.delta_table_helper.ensure_bucket_exists"
+                "products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta_table_helper.ensure_bucket_exists"
             ),
         ):
             options = helper.get_storage_options()
@@ -358,7 +361,7 @@ class TestGetDeltaTableUnrecoverableErrors:
         s3_cm.__aenter__ = AsyncMock(return_value=s3)
         s3_cm.__aexit__ = AsyncMock(return_value=False)
 
-        module = "products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.delta_table_helper"
+        module = "products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta_table_helper"
         with (
             patch.object(helper, "_get_delta_table_uri", AsyncMock(return_value=delta_uri)),
             patch(f"{module}.deltalake.DeltaTable") as mock_delta_table,
@@ -388,7 +391,7 @@ class TestGetDeltaTableUnrecoverableErrors:
         helper = DeltaTableHelper(resource_name="t", job=MagicMock(), logger=_make_logger())
         delta_uri = "s3://bucket/team_id/job_id/t"
 
-        module = "products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.delta_table_helper"
+        module = "products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta_table_helper"
         with (
             patch.object(helper, "_get_delta_table_uri", AsyncMock(return_value=delta_uri)),
             patch(f"{module}.deltalake.DeltaTable") as mock_delta_table,
@@ -597,6 +600,74 @@ class TestLegacyDltTableReconciliation:
         final = result.to_pyarrow_table()
         assert final.num_rows == 3
         assert set(final.column("id").to_pylist()) == {1, 2, 3}
+
+
+class TestAppendDecimalReconciliation:
+    """Appending a decimal column that outgrew decimal128 must reconcile to the stored type.
+
+    A batch whose numeric column exceeds decimal128 is promoted to decimal256, which
+    `evolve_pyarrow_schema` renders to text for the Delta write. Arrow emits scientific
+    notation for scale-heavy zeros (e.g. '0E-18'), which delta-rs can't parse back into
+    the stored decimal — an opaque, infinitely-retrying DeltaError on the append path.
+    """
+
+    def _seed_decimal_table(self, delta_path: str) -> deltalake.DeltaTable:
+        table = pa.table(
+            {"id": pa.array([1], type=pa.int64()), "amount": pa.array([Decimal("1.5")], type=pa.decimal128(38, 10))}
+        )
+        deltalake.write_deltalake(delta_path, table)
+        return deltalake.DeltaTable(delta_path)
+
+    @pytest.mark.asyncio
+    async def test_scale_heavy_batch_is_rounded_to_stored_type(self, tmp_path: Path) -> None:
+        delta_path = str(tmp_path / "table")
+        dt = self._seed_decimal_table(delta_path)
+        helper = _make_local_helper(delta_path)
+
+        # Values fit decimal128's integer budget but carry more scale than the stored column,
+        # so they land as decimal256 and evolve renders them to text (the zero as '0E-18').
+        batch = evolve_pyarrow_schema(
+            pa.table(
+                {
+                    "id": pa.array([2, 3], type=pa.int64()),
+                    "amount": pa.array(
+                        [Decimal("0.12345678901234567890"), Decimal("0E-18")], type=pa.decimal256(76, 20)
+                    ),
+                }
+            ),
+            dt.schema(),
+        )
+        assert pa.types.is_string(batch.schema.field("amount").type)
+
+        result = await helper.write_to_deltalake(
+            data=batch, write_type="append", should_overwrite_table=False, primary_keys=None
+        )
+
+        final = result.to_pyarrow_table()
+        assert final.schema.field("amount").type == pa.decimal128(38, 10)
+        assert set(final.column("id").to_pylist()) == {1, 2, 3}
+        assert Decimal("0") in final.column("amount").to_pylist()
+
+    @pytest.mark.asyncio
+    async def test_integer_overflow_batch_raises_clean_non_retryable(self, tmp_path: Path) -> None:
+        delta_path = str(tmp_path / "table")
+        dt = self._seed_decimal_table(delta_path)
+        helper = _make_local_helper(delta_path)
+
+        batch = evolve_pyarrow_schema(
+            pa.table(
+                {
+                    "id": pa.array([2, 3], type=pa.int64()),
+                    "amount": pa.array([Decimal("1" + "0" * 35 + ".5"), Decimal("0E-18")], type=pa.decimal256(76, 18)),
+                }
+            ),
+            dt.schema(),
+        )
+
+        with pytest.raises(SchemaColumnTypeChangedException):
+            await helper.write_to_deltalake(
+                data=batch, write_type="append", should_overwrite_table=False, primary_keys=None
+            )
 
 
 class TestIncrementalBatchDeduplication:
@@ -901,7 +972,7 @@ class TestVacuumIfStale:
     async def test_vacuum_cadence(
         self, _name: str, last_version: int | None, expect_vacuum: bool, expected_return: int | None
     ):
-        module = "products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.delta_table_helper"
+        module = "products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta_table_helper"
         helper = self._helper()
         table = MagicMock()
         table.version = MagicMock(return_value=150)
@@ -957,7 +1028,7 @@ class TestRunMaintenance:
 
 
 class TestIsTableCorrupted:
-    _MODULE = "products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.delta_table_helper"
+    _MODULE = "products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta_table_helper"
 
     def _helper(self) -> DeltaTableHelper:
         return DeltaTableHelper("t", MagicMock(), MagicMock(adebug=AsyncMock()), False)
