@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -15,6 +16,11 @@ LOGGER = get_logger(__name__)
 
 # One scan should not be able to schedule the whole fleet; the next tick picks up the rest.
 MAX_DUE_CHECKS_PER_SCAN = 2000
+# ...and no single project may fill that window, starving every other project's checks behind its
+# backlog. Its overflow waits for the next tick. The candidate read is bounded well above the scan
+# cap so other projects are still reachable past one project's due checks.
+MAX_DUE_CHECKS_PER_TEAM = 500
+_MAX_SCAN_CANDIDATES = MAX_DUE_CHECKS_PER_SCAN * 5
 
 
 @activity.defn
@@ -35,7 +41,7 @@ def _retrieve_due_checks() -> list[DueCheckGroup]:
     two-phase claim; not worth the schema until someone sees a skipped cycle that mattered.
     """
     now = datetime.now(UTC)
-    due = list(
+    candidates = (
         DataQualityCheck.objects.unscoped()
         .filter(
             enabled=True,
@@ -44,8 +50,21 @@ def _retrieve_due_checks() -> list[DueCheckGroup]:
             schedule_interval_minutes__gt=0,
         )
         .exclude(subject_status=SubjectStatus.ORPHANED)
-        .order_by("next_run_at")[:MAX_DUE_CHECKS_PER_SCAN]
+        .order_by("next_run_at")[:_MAX_SCAN_CANDIDATES]
     )
+
+    # Claim oldest-due first, but cap each project so one backlog can't take the whole window; a
+    # project over its cap has the rest of its checks picked up on a later tick. Only claimed checks
+    # get their next_run_at advanced, so anything skipped here stays due.
+    per_team: dict[int, int] = defaultdict(int)
+    due: list[DataQualityCheck] = []
+    for check in candidates:
+        if per_team[check.team_id] >= MAX_DUE_CHECKS_PER_TEAM:
+            continue
+        per_team[check.team_id] += 1
+        due.append(check)
+        if len(due) >= MAX_DUE_CHECKS_PER_SCAN:
+            break
     if not due:
         return []
 

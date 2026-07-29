@@ -2,8 +2,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from posthog.test.base import BaseTest
+from unittest.mock import patch
 
 from parameterized import parameterized
+
+from posthog.models.team import Team
 
 from products.data_quality.backend.facade.enums import CheckRunStatus, CheckType, SubjectStatus, SubjectType
 from products.data_quality.backend.logic.scheduling import (
@@ -125,6 +128,32 @@ class TestDueCheckScan(BaseTest):
         check.refresh_from_db()
         assert check.next_run_at is not None
         assert check.next_run_at > datetime.now(UTC)
+
+    def test_one_team_cannot_fill_the_whole_scan_window(self) -> None:
+        # A project with a backlog must not crowd every other project's checks out of the scan; its
+        # overflow waits for the next tick. Only claimed checks get their next_run_at advanced.
+        other_team = Team.objects.create(organization=self.organization, name="Other team")
+        self._check(subject_uuid=uuid4())
+        self._check(subject_uuid=uuid4())
+        DataQualityCheck.objects.for_team(other_team.id).create(
+            team=other_team,
+            subject_type=SubjectType.VIEW,
+            subject_uuid=uuid4(),
+            subject_name="orders",
+            check_type=CheckType.NOT_NULL,
+            column_name="customer_id",
+            fingerprint=uuid4().hex,
+            schedule_interval_minutes=60,
+            next_run_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+
+        with patch("products.data_quality.backend.temporal.activities.schedule_due_checks.MAX_DUE_CHECKS_PER_TEAM", 1):
+            _retrieve_due_checks()
+
+        # One of this team's two due checks is held back; the other team's check is not starved.
+        now = datetime.now(UTC)
+        assert DataQualityCheck.objects.for_team(self.team.id).filter(next_run_at__gt=now).count() == 1
+        assert DataQualityCheck.objects.for_team(other_team.id).filter(next_run_at__gt=now).count() == 1
 
 
 class TestRetention(BaseTest):
