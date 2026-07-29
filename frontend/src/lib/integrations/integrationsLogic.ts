@@ -45,6 +45,9 @@ export interface integrationsLogicValues {
     getGitHubRepositoriesFull: (integrationId: number) => GitHubRepoApi[]
     getIntegrationsByKind: (
         kinds: (
+            | 'amazon-selling-partner-eu'
+            | 'amazon-selling-partner-fe'
+            | 'amazon-selling-partner-na'
             | 'apns'
             | 'aws-s3'
             | 'azure-blob'
@@ -119,6 +122,9 @@ export interface integrationsLogicActions {
         searchParams: any
     ) => {
         kind:
+            | 'amazon-selling-partner-eu'
+            | 'amazon-selling-partner-fe'
+            | 'amazon-selling-partner-na'
             | 'apns'
             | 'aws-s3'
             | 'azure-blob'
@@ -214,6 +220,9 @@ export interface integrationsLogicActions {
             icon_url: any
             id: number
             kind:
+                | 'amazon-selling-partner-eu'
+                | 'amazon-selling-partner-fe'
+                | 'amazon-selling-partner-na'
                 | 'apns'
                 | 'aws-s3'
                 | 'azure-blob'
@@ -264,6 +273,9 @@ export interface integrationsLogicActions {
             icon_url: any
             id: number
             kind:
+                | 'amazon-selling-partner-eu'
+                | 'amazon-selling-partner-fe'
+                | 'amazon-selling-partner-na'
                 | 'apns'
                 | 'aws-s3'
                 | 'azure-blob'
@@ -331,6 +343,9 @@ export interface integrationsLogicActions {
             icon_url: any
             id: number
             kind:
+                | 'amazon-selling-partner-eu'
+                | 'amazon-selling-partner-fe'
+                | 'amazon-selling-partner-na'
                 | 'apns'
                 | 'aws-s3'
                 | 'azure-blob'
@@ -385,6 +400,9 @@ export interface integrationsLogicActions {
             icon_url: any
             id: number
             kind:
+                | 'amazon-selling-partner-eu'
+                | 'amazon-selling-partner-fe'
+                | 'amazon-selling-partner-na'
                 | 'apns'
                 | 'aws-s3'
                 | 'azure-blob'
@@ -432,6 +450,9 @@ export interface integrationsLogicActions {
     }
     openNewIntegrationModal: (kind: IntegrationKind) => {
         kind:
+            | 'amazon-selling-partner-eu'
+            | 'amazon-selling-partner-fe'
+            | 'amazon-selling-partner-na'
             | 'apns'
             | 'aws-s3'
             | 'azure-blob'
@@ -490,6 +511,9 @@ export interface integrationsLogicActions {
     }
     requestIntegrationAccessSuccess: (
         accessRequest:
+            | 'amazon-selling-partner-eu'
+            | 'amazon-selling-partner-fe'
+            | 'amazon-selling-partner-na'
             | 'apns'
             | 'aws-s3'
             | 'azure-blob'
@@ -533,6 +557,9 @@ export interface integrationsLogicActions {
         }
     ) => {
         accessRequest:
+            | 'amazon-selling-partner-eu'
+            | 'amazon-selling-partner-fe'
+            | 'amazon-selling-partner-na'
             | 'apns'
             | 'aws-s3'
             | 'azure-blob'
@@ -588,6 +615,9 @@ export interface integrationsLogicMeta {
             integrations: IntegrationType[] | null
         ) => (
             kinds: (
+                | 'amazon-selling-partner-eu'
+                | 'amazon-selling-partner-fe'
+                | 'amazon-selling-partner-na'
                 | 'apns'
                 | 'aws-s3'
                 | 'azure-blob'
@@ -857,7 +887,8 @@ export const integrationsLogic = kea<integrationsLogicType>([
             }
         },
         handleOauthCallback: async ({ kind, searchParams }) => {
-            const { state, code, error, stripe_user_id, account_id, user_id } = searchParams
+            const { state, code, error, stripe_user_id, account_id, user_id, spapi_oauth_code, selling_partner_id } =
+                searchParams
             const { next, token, source, server_id } = fromParamsGivenUrl(state)
             const resolvedKind = kind
             let replaceUrl: string = next || urls.settings('project-integrations')
@@ -905,7 +936,10 @@ export const integrationsLogic = kea<integrationsLogicType>([
                 } else {
                     const integration = await api.integrations.create({
                         kind: resolvedKind,
-                        config: { state, code },
+                        // Amazon's Selling Partner API answers with `spapi_oauth_code` instead of
+                        // `code`, and names the authorizing seller in `selling_partner_id` — the
+                        // token response carries no account identifier at all.
+                        config: spapi_oauth_code ? { state, spapi_oauth_code, selling_partner_id } : { state, code },
                     })
 
                     // Add the integration ID to the replaceUrl so that the landing page can use it

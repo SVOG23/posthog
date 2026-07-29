@@ -7,6 +7,7 @@ from posthog.schema import (
     SourceConfig,
     SourceFieldInputConfig,
     SourceFieldInputConfigType,
+    SourceFieldOauthConfig,
     SourceFieldSelectConfig,
     SourceFieldSelectConfigOption,
 )
@@ -20,6 +21,10 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.amazon_sel
     amazon_selling_partner_source,
     validate_credentials as validate_amazon_selling_partner_credentials,
 )
+from products.warehouse_sources.backend.temporal.data_imports.sources.amazon_selling_partner.oauth import (
+    AccessTokenProvider,
+    amazon_selling_partner_token_provider,
+)
 from products.warehouse_sources.backend.temporal.data_imports.sources.amazon_selling_partner.settings import (
     ENDPOINTS,
     INCREMENTAL_FIELDS,
@@ -28,6 +33,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.bas
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.canonical_descriptions import (
     CanonicalDescriptions,
 )
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.mixins import OAuthMixin
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.registry import SourceRegistry
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import (
@@ -41,7 +47,9 @@ from products.warehouse_sources.backend.types import ExternalDataSourceType
 
 
 @SourceRegistry.register
-class AmazonSellingPartnerSource(ResumableSource[AmazonSellingPartnerSourceConfig, AmazonSellingPartnerResumeConfig]):
+class AmazonSellingPartnerSource(
+    ResumableSource[AmazonSellingPartnerSourceConfig, AmazonSellingPartnerResumeConfig], OAuthMixin
+):
     # Every SP-API operation carries its own version (orders v0, finances 2024-06-19,
     # reports 2021-06-30), so there is no single version to pin at the source level.
     api_docs_url = "https://developer-docs.amazon.com/sp-api/docs/welcome"
@@ -54,10 +62,11 @@ class AmazonSellingPartnerSource(ResumableSource[AmazonSellingPartnerSourceConfi
 
     def get_non_retryable_errors(self) -> dict[str, str | None]:
         return {
-            "400 Client Error: Bad Request for url: https://api.amazon.com/auth/o2/token": "Amazon rejected your Login with Amazon credentials. The refresh token may have been revoked — reauthorize the app in Seller Central and reconnect.",
-            "401 Client Error: Unauthorized for url: https://api.amazon.com/auth/o2/token": "Amazon could not issue an access token. Check your Login with Amazon client ID and secret.",
-            "401 Client Error: Unauthorized for url: https://sellingpartnerapi-": "Amazon rejected the access token. Reauthorize the app in Seller Central and reconnect.",
-            "403 Client Error: Forbidden for url: https://sellingpartnerapi-": "Amazon denied access to this data. Check that your app has the roles this table needs, and that the seller has authorized them.",
+            "Missing integration ID": "This source has no Amazon seller account connected. Connect one and try again.",
+            "Integration not found": "The connected Amazon seller account was removed. Connect it again and try again.",
+            "Amazon Selling Partner access token not found": "PostHog could not read an access token for this Amazon seller account. Connect it again.",
+            "401 Client Error: Unauthorized for url: https://sellingpartnerapi-": "Amazon rejected the access token. Reauthorize PostHog in Seller Central and connect the account again.",
+            "403 Client Error: Forbidden for url: https://sellingpartnerapi-": "Amazon denied access to this data. Check that the seller has granted PostHog the permissions this table needs.",
         }
 
     def get_retryable_errors(self) -> set[str]:
@@ -71,7 +80,7 @@ class AmazonSellingPartnerSource(ResumableSource[AmazonSellingPartnerSourceConfi
             label="Amazon Selling Partner",
             caption="""Connect your Amazon seller account to pull orders, financial transactions, FBA inventory, and sales and traffic data into the PostHog Data warehouse.
 
-You need a registered Selling Partner API app. A private app can self-authorize from Seller Central, which gives you the client ID, client secret, and refresh token to paste here — no redirect needed. Pick the region your seller account belongs to, and list the marketplace IDs you want to sync separated by commas.""",
+Pick the region your seller account belongs to, then connect the account and confirm the access Amazon asks for. List the marketplace IDs you want to sync, separated by commas.""",
             iconPath="/static/services/amazon_selling_partner.png",
             docsUrl="https://posthog.com/docs/cdp/sources/amazon-selling-partner",
             releaseStatus=ReleaseStatus.ALPHA,
@@ -79,15 +88,61 @@ You need a registered Selling Partner API app. A private app can self-authorize 
             fields=cast(
                 list[FieldType],
                 [
+                    # An Amazon selling account belongs to one region, and a seller can only sign in
+                    # to the Seller Central for that region, so the region choice also decides which
+                    # Seller Central hosts the consent page. Each region therefore has its own
+                    # integration kind, and the Connect button lives under the region option.
                     SourceFieldSelectConfig(
                         name="region",
                         label="Region",
                         required=True,
                         defaultValue="na",
                         options=[
-                            SourceFieldSelectConfigOption(label="North America", value="na"),
-                            SourceFieldSelectConfigOption(label="Europe", value="eu"),
-                            SourceFieldSelectConfigOption(label="Far East", value="fe"),
+                            SourceFieldSelectConfigOption(
+                                label="North America",
+                                value="na",
+                                fields=cast(
+                                    list[FieldType],
+                                    [
+                                        SourceFieldOauthConfig(
+                                            name="amazon_selling_partner_integration_id",
+                                            label="Amazon seller account",
+                                            required=True,
+                                            kind="amazon-selling-partner-na",
+                                        ),
+                                    ],
+                                ),
+                            ),
+                            SourceFieldSelectConfigOption(
+                                label="Europe",
+                                value="eu",
+                                fields=cast(
+                                    list[FieldType],
+                                    [
+                                        SourceFieldOauthConfig(
+                                            name="amazon_selling_partner_integration_id",
+                                            label="Amazon seller account",
+                                            required=True,
+                                            kind="amazon-selling-partner-eu",
+                                        ),
+                                    ],
+                                ),
+                            ),
+                            SourceFieldSelectConfigOption(
+                                label="Far East",
+                                value="fe",
+                                fields=cast(
+                                    list[FieldType],
+                                    [
+                                        SourceFieldOauthConfig(
+                                            name="amazon_selling_partner_integration_id",
+                                            label="Amazon seller account",
+                                            required=True,
+                                            kind="amazon-selling-partner-fe",
+                                        ),
+                                    ],
+                                ),
+                            ),
                         ],
                     ),
                     SourceFieldInputConfig(
@@ -97,30 +152,6 @@ You need a registered Selling Partner API app. A private app can self-authorize 
                         required=True,
                         placeholder="ATVPDKIKX0DER",
                         secret=False,
-                    ),
-                    SourceFieldInputConfig(
-                        name="client_id",
-                        label="LWA client ID",
-                        type=SourceFieldInputConfigType.TEXT,
-                        required=True,
-                        placeholder="amzn1.application-oa2-client...",
-                        secret=False,
-                    ),
-                    SourceFieldInputConfig(
-                        name="client_secret",
-                        label="LWA client secret",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="",
-                        secret=True,
-                    ),
-                    SourceFieldInputConfig(
-                        name="refresh_token",
-                        label="Refresh token",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="Atzr|...",
-                        secret=True,
                     ),
                 ],
             ),
@@ -144,6 +175,12 @@ You need a registered Selling Partner API app. A private app can self-authorize 
     ) -> list[SourceSchema]:
         return build_endpoint_schemas(ENDPOINTS, INCREMENTAL_FIELDS, names)
 
+    def _token_provider(self, config: AmazonSellingPartnerSourceConfig, team_id: int) -> AccessTokenProvider:
+        integration_id = config.region.amazon_selling_partner_integration_id
+        # Confirms the integration exists and belongs to this team before anything reads its token.
+        self.get_oauth_integration(integration_id, team_id)
+        return amazon_selling_partner_token_provider(integration_id, team_id)
+
     def validate_credentials(
         self,
         config: AmazonSellingPartnerSourceConfig,
@@ -151,9 +188,19 @@ You need a registered Selling Partner API app. A private app can self-authorize 
         schema_name: Optional[str] = None,
         api_version: str | None = None,
     ) -> tuple[bool, str | None]:
-        return validate_amazon_selling_partner_credentials(
-            config.region, config.client_id, config.client_secret, config.refresh_token
-        )
+        try:
+            token_provider = self._token_provider(config, team_id)
+        except ValueError as e:
+            # The mixin raises deterministic wording ("Missing integration ID", "Integration not
+            # found: 42") that is unhelpful in the wizard and can carry an internal id, so reuse the
+            # curated messages instead of surfacing it raw.
+            raw = str(e)
+            for pattern, friendly in self.get_non_retryable_errors().items():
+                if friendly and pattern in raw:
+                    return False, friendly
+            return False, raw
+
+        return validate_amazon_selling_partner_credentials(config.region.selection, token_provider)
 
     def get_resumable_source_manager(
         self, inputs: SourceInputs
@@ -171,10 +218,8 @@ You need a registered Selling Partner API app. A private app can self-authorize 
         inputs: SourceInputs,
     ) -> SourceResponse:
         return amazon_selling_partner_source(
-            region=config.region,
-            client_id=config.client_id,
-            client_secret=config.client_secret,
-            refresh_token=config.refresh_token,
+            region=config.region.selection,
+            access_token_provider=self._token_provider(config, inputs.team_id),
             marketplace_ids=config.marketplace_ids,
             endpoint=inputs.schema_name,
             logger=inputs.logger,

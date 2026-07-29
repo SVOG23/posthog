@@ -14,6 +14,9 @@ import type { UserBasicType } from '../../../types'
 export interface organizationIntegrationsLogicValues {
     getOrganizationIntegrationsByKind: (
         kinds: (
+            | 'amazon-selling-partner-eu'
+            | 'amazon-selling-partner-fe'
+            | 'amazon-selling-partner-na'
             | 'apns'
             | 'aws-s3'
             | 'azure-blob'
@@ -82,6 +85,9 @@ export interface organizationIntegrationsLogicActions {
             icon_url: any
             id: number
             kind:
+                | 'amazon-selling-partner-eu'
+                | 'amazon-selling-partner-fe'
+                | 'amazon-selling-partner-na'
                 | 'apns'
                 | 'aws-s3'
                 | 'azure-blob'
@@ -132,6 +138,9 @@ export interface organizationIntegrationsLogicActions {
             icon_url: any
             id: number
             kind:
+                | 'amazon-selling-partner-eu'
+                | 'amazon-selling-partner-fe'
+                | 'amazon-selling-partner-na'
                 | 'apns'
                 | 'aws-s3'
                 | 'azure-blob'
@@ -183,6 +192,9 @@ export interface organizationIntegrationsLogicMeta {
             organizationIntegrations: IntegrationType[] | null
         ) => (
             kinds: (
+                | 'amazon-selling-partner-eu'
+                | 'amazon-selling-partner-fe'
+                | 'amazon-selling-partner-na'
                 | 'apns'
                 | 'aws-s3'
                 | 'azure-blob'

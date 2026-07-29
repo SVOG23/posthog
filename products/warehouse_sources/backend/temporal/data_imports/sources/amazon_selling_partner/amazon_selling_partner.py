@@ -12,6 +12,9 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from urllib3.util import Retry
 
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.typings import SourceResponse
+from products.warehouse_sources.backend.temporal.data_imports.sources.amazon_selling_partner.oauth import (
+    AccessTokenProvider,
+)
 from products.warehouse_sources.backend.temporal.data_imports.sources.amazon_selling_partner.settings import (
     AMAZON_SELLING_PARTNER_ENDPOINTS,
     SpApiEndpointConfig,
@@ -24,17 +27,16 @@ SP_API_HOSTS = {
     "eu": "https://sellingpartnerapi-eu.amazon.com",
     "fe": "https://sellingpartnerapi-fe.amazon.com",
 }
-# Login with Amazon issues the short-lived SP-API access token; the endpoint is global.
-LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 REPORTS_PATH = "/reports/2021-06-30/reports"
 REPORT_DOCUMENTS_PATH = "/reports/2021-06-30/documents"
 SELLERS_PARTICIPATIONS_PATH = "/sellers/v1/marketplaceParticipations"
 
 REQUEST_TIMEOUT_SECONDS = 120
 MAX_RETRY_ATTEMPTS = 6
-# Access tokens live an hour; re-mint a minute early so a long page fetch can't
-# start with a token that expires mid-flight.
-TOKEN_EXPIRY_MARGIN_SECONDS = 60
+# Access tokens live an hour and the integration row is refreshed once it is past its own half-life,
+# so re-reading the row every few minutes keeps a long sync on a fresh token without hammering
+# Postgres on every request.
+TOKEN_CACHE_SECONDS = 300
 DEFAULT_LOOKBACK_DAYS = 365
 # Report jobs are billed per request and carry undocumented per-type cooldowns, so
 # backfills are sliced into windows rather than one job per day.
@@ -130,62 +132,36 @@ def _extract_next_token(body: dict[str, Any], token_param: str) -> Optional[str]
 
 
 class SellingPartnerClient:
-    """Minimal SP-API client: LWA token lifecycle, retries, and JSON requests.
+    """Minimal SP-API client: token caching, retries, and JSON requests.
 
     SP-API dropped AWS SigV4 signing in 2023, so requests are plain HTTPS carrying the
-    Login with Amazon access token in `x-amz-access-token`.
+    Login with Amazon access token in `x-amz-access-token`. The token itself comes from the
+    OAuth integration row via `access_token_provider` — this client never holds the grant.
     """
 
     def __init__(
         self,
         region: str,
-        client_id: str,
-        client_secret: str,
-        refresh_token: str,
+        access_token_provider: AccessTokenProvider,
         logger: Optional[FilteringBoundLogger] = None,
     ) -> None:
         self.base_url = _base_url(region)
-        self._client_id = client_id
-        self._client_secret = client_secret
-        self._refresh_token = refresh_token
+        self._access_token_provider = access_token_provider
         self._logger = logger
         # Retries live in `_request` (tenacity) so POSTs and the report-job polling loop
         # are covered too; a transport-level policy would only cover idempotent verbs and
         # would compound with this one.
         # `capture=False`: every SP-API call carries a freshly minted `x-amz-access-token`
-        # bearer and the LWA mint response returns it in the body, neither of which the
-        # name-based scrubbers recognise; responses can also hold buyer PII. Keep the
-        # session metered and logged, but out of HTTP sample capture.
-        self._session = make_tracked_session(
-            retry=Retry(total=0),
-            redact_values=(client_secret, refresh_token),
-            capture=False,
-        )
+        # bearer, which the name-based scrubbers don't recognise; responses can also hold
+        # buyer PII. Keep the session metered and logged, but out of HTTP sample capture.
+        self._session = make_tracked_session(retry=Retry(total=0), capture=False)
         self._token: Optional[str] = None
-        self._token_expires_at: float = 0.0
-
-    def _mint_token(self) -> str:
-        response = self._session.post(
-            LWA_TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": self._refresh_token,
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        body = response.json()
-        expires_in = body.get("expires_in")
-        ttl = float(expires_in) if isinstance(expires_in, int | float) else 3600.0
-        self._token_expires_at = time.monotonic() + max(ttl - TOKEN_EXPIRY_MARGIN_SECONDS, 0.0)
-        self._token = str(body["access_token"])
-        return self._token
+        self._token_cached_until: float = 0.0
 
     def access_token(self, force_refresh: bool = False) -> str:
-        if force_refresh or self._token is None or time.monotonic() >= self._token_expires_at:
-            return self._mint_token()
+        if force_refresh or self._token is None or time.monotonic() >= self._token_cached_until:
+            self._token = self._access_token_provider(force_refresh)
+            self._token_cached_until = time.monotonic() + TOKEN_CACHE_SECONDS
         return self._token
 
     def request(
@@ -250,20 +226,18 @@ class SellingPartnerClient:
 
 def validate_credentials(
     region: str,
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token_provider: AccessTokenProvider,
 ) -> tuple[bool, Optional[str]]:
-    """Mint a token and probe the sellers API to confirm the app is authorized."""
+    """Read the connection's access token and probe the sellers API to confirm it is authorized."""
     try:
-        client = SellingPartnerClient(region, client_id, client_secret, refresh_token)
+        client = SellingPartnerClient(region, access_token_provider)
     except ValueError as e:
         return False, str(e)
 
     try:
         client.access_token()
     except Exception:
-        return False, "Could not get an Amazon access token. Check your LWA client ID, secret, and refresh token."
+        return False, "Could not get an Amazon access token. Reconnect your Amazon seller account."
 
     try:
         client.request("GET", SELLERS_PARTICIPATIONS_PATH)
@@ -273,7 +247,10 @@ def validate_credentials(
             # A valid token whose app lacks the Selling Partner Insights role still syncs
             # the endpoints it is approved for, so this must not block source creation.
             return True, None
-        return False, "Amazon rejected the Selling Partner API request. Check that your app is authorized for SP-API."
+        return (
+            False,
+            "Amazon rejected the Selling Partner API request. Reauthorize PostHog in Seller Central and reconnect.",
+        )
     except Exception:
         return False, "Could not reach the Amazon Selling Partner API."
 
@@ -527,9 +504,7 @@ def _report_rows(
 
 def get_rows(
     region: str,
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token_provider: AccessTokenProvider,
     marketplace_ids: str,
     endpoint: str,
     logger: FilteringBoundLogger,
@@ -539,7 +514,7 @@ def get_rows(
 ) -> Iterator[list[dict[str, Any]]]:
     config = AMAZON_SELLING_PARTNER_ENDPOINTS[endpoint]
     parsed_marketplace_ids = parse_marketplace_ids(marketplace_ids)
-    client = SellingPartnerClient(region, client_id, client_secret, refresh_token, logger=logger)
+    client = SellingPartnerClient(region, access_token_provider, logger=logger)
     resume = resumable_source_manager.load_state() if resumable_source_manager.can_resume() else None
 
     watermark = db_incremental_field_last_value if should_use_incremental_field else None
@@ -561,9 +536,7 @@ def get_rows(
 
 def amazon_selling_partner_source(
     region: str,
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token_provider: AccessTokenProvider,
     marketplace_ids: str,
     endpoint: str,
     logger: FilteringBoundLogger,
@@ -577,9 +550,7 @@ def amazon_selling_partner_source(
         name=endpoint,
         items=lambda: get_rows(
             region=region,
-            client_id=client_id,
-            client_secret=client_secret,
-            refresh_token=refresh_token,
+            access_token_provider=access_token_provider,
             marketplace_ids=marketplace_ids,
             endpoint=endpoint,
             logger=logger,

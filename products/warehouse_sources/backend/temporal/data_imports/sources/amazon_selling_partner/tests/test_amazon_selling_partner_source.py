@@ -3,13 +3,7 @@ from typing import Optional
 import pytest
 from unittest import mock
 
-from posthog.schema import (
-    DataWarehouseSourceCategory,
-    ReleaseStatus,
-    SourceFieldInputConfig,
-    SourceFieldInputConfigType,
-    SourceFieldSelectConfig,
-)
+from posthog.schema import DataWarehouseSourceCategory, ReleaseStatus, SourceFieldOauthConfig, SourceFieldSelectConfig
 
 from products.warehouse_sources.backend.temporal.data_imports.sources.amazon_selling_partner.amazon_selling_partner import (
     AmazonSellingPartnerResumeConfig,
@@ -23,6 +17,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.amazon_sel
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.amazonsellingpartner import (
+    AmazonSellingPartnerRegionConfig,
     AmazonSellingPartnerSourceConfig,
 )
 from products.warehouse_sources.backend.types import ExternalDataSourceType
@@ -35,11 +30,8 @@ class TestAmazonSellingPartnerSource:
         self.source = AmazonSellingPartnerSource()
         self.team_id = 123
         self.config = AmazonSellingPartnerSourceConfig(
-            region="na",
+            region=AmazonSellingPartnerRegionConfig(selection="na", amazon_selling_partner_integration_id=7),
             marketplace_ids="ATVPDKIKX0DER",
-            client_id="cid",
-            client_secret="secret",
-            refresh_token="refresh",
         )
 
     def test_source_type(self) -> None:
@@ -55,13 +47,7 @@ class TestAmazonSellingPartnerSource:
         assert config.unreleasedSource is None
         assert config.iconPath == "/static/services/amazon_selling_partner.png"
 
-        assert [f.name for f in config.fields] == [
-            "region",
-            "marketplace_ids",
-            "client_id",
-            "client_secret",
-            "refresh_token",
-        ]
+        assert [f.name for f in config.fields] == ["region", "marketplace_ids"]
 
     def test_region_field_is_a_select_over_the_supported_hosts(self) -> None:
         region_field = next(f for f in self.source.get_source_config.fields if f.name == "region")
@@ -70,23 +56,32 @@ class TestAmazonSellingPartnerSource:
         assert region_field.defaultValue == "na"
         assert {option.value for option in region_field.options} == {"na", "eu", "fe"}
 
-    @pytest.mark.parametrize("field_name", ["client_secret", "refresh_token"])
-    def test_credential_fields_are_secret_passwords(self, field_name: str) -> None:
-        field = next(
-            f
-            for f in self.source.get_source_config.fields
-            if isinstance(f, SourceFieldInputConfig) and f.name == field_name
-        )
+    @pytest.mark.parametrize(
+        "region, expected_kind",
+        [
+            ("na", "amazon-selling-partner-na"),
+            ("eu", "amazon-selling-partner-eu"),
+            ("fe", "amazon-selling-partner-fe"),
+        ],
+    )
+    def test_each_region_connects_through_its_own_integration_kind(self, region: str, expected_kind: str) -> None:
+        # A seller can only consent on the Seller Central for their own region, so the Connect
+        # button under each region has to point at that region's integration kind.
+        region_field = next(f for f in self.source.get_source_config.fields if f.name == "region")
+        assert isinstance(region_field, SourceFieldSelectConfig)
+        option = next(o for o in region_field.options if o.value == region)
 
-        assert field.type == SourceFieldInputConfigType.PASSWORD
-        assert field.secret is True
-        assert field.required is True
+        assert option.fields is not None
+        oauth_field = option.fields[0]
+        assert isinstance(oauth_field, SourceFieldOauthConfig)
+        assert oauth_field.name == "amazon_selling_partner_integration_id"
+        assert oauth_field.kind == expected_kind
 
     @pytest.mark.parametrize(
         "observed_error",
         [
-            "400 Client Error: Bad Request for url: https://api.amazon.com/auth/o2/token",
-            "401 Client Error: Unauthorized for url: https://api.amazon.com/auth/o2/token",
+            "Missing integration ID",
+            "Integration not found: 7",
             "401 Client Error: Unauthorized for url: https://sellingpartnerapi-na.amazon.com/orders/v0/orders",
             "403 Client Error: Forbidden for url: https://sellingpartnerapi-eu.amazon.com/fba/inventory/v1/summaries",
         ],
@@ -144,17 +139,41 @@ class TestAmazonSellingPartnerSource:
             ),
         ],
     )
+    @mock.patch(f"{_MODULE}.amazon_selling_partner_token_provider")
+    @mock.patch.object(AmazonSellingPartnerSource, "get_oauth_integration")
     @mock.patch(f"{_MODULE}.validate_amazon_selling_partner_credentials")
     def test_validate_credentials(
         self,
         mock_validate: mock.MagicMock,
+        mock_get_integration: mock.MagicMock,
+        mock_provider: mock.MagicMock,
         helper_result: tuple[bool, Optional[str]],
         expected: tuple[bool, Optional[str]],
     ) -> None:
         mock_validate.return_value = helper_result
 
         assert self.source.validate_credentials(self.config, self.team_id) == expected
-        mock_validate.assert_called_once_with("na", "cid", "secret", "refresh")
+        mock_get_integration.assert_called_once_with(7, self.team_id)
+        mock_validate.assert_called_once_with("na", mock_provider.return_value)
+
+    @pytest.mark.parametrize(
+        "raised, expected_error",
+        [
+            (ValueError("Missing integration ID"), "no Amazon seller account connected"),
+            (ValueError("Integration not found: 7"), "was removed"),
+        ],
+    )
+    @mock.patch.object(AmazonSellingPartnerSource, "get_oauth_integration")
+    def test_validate_credentials_without_a_usable_integration(
+        self, mock_get_integration: mock.MagicMock, raised: ValueError, expected_error: str
+    ) -> None:
+        mock_get_integration.side_effect = raised
+
+        is_valid, error = self.source.validate_credentials(self.config, self.team_id)
+
+        assert is_valid is False
+        assert error is not None
+        assert expected_error in error
 
     def test_get_resumable_source_manager_isolates_state_per_schema(self) -> None:
         inputs = mock.MagicMock()
@@ -168,31 +187,40 @@ class TestAmazonSellingPartnerSource:
         assert manager._data_class is AmazonSellingPartnerResumeConfig
         assert manager._key.endswith(":orders")
 
+    @mock.patch(f"{_MODULE}.amazon_selling_partner_token_provider")
+    @mock.patch.object(AmazonSellingPartnerSource, "get_oauth_integration")
     @mock.patch(f"{_MODULE}.amazon_selling_partner_source")
-    def test_source_for_pipeline_plumbs_arguments(self, mock_source: mock.MagicMock) -> None:
+    def test_source_for_pipeline_plumbs_arguments(
+        self, mock_source: mock.MagicMock, mock_get_integration: mock.MagicMock, mock_provider: mock.MagicMock
+    ) -> None:
         inputs = mock.MagicMock()
         inputs.schema_name = "orders"
+        inputs.team_id = self.team_id
         inputs.should_use_incremental_field = True
         inputs.db_incremental_field_last_value = "2024-05-01T00:00:00Z"
         manager = mock.MagicMock()
 
         self.source.source_for_pipeline(self.config, manager, inputs)
 
+        mock_provider.assert_called_once_with(7, self.team_id)
         kwargs = mock_source.call_args.kwargs
         assert kwargs["region"] == "na"
         assert kwargs["marketplace_ids"] == "ATVPDKIKX0DER"
-        assert kwargs["client_id"] == "cid"
-        assert kwargs["client_secret"] == "secret"
-        assert kwargs["refresh_token"] == "refresh"
+        assert kwargs["access_token_provider"] is mock_provider.return_value
         assert kwargs["endpoint"] == "orders"
         assert kwargs["resumable_source_manager"] is manager
         assert kwargs["should_use_incremental_field"] is True
         assert kwargs["db_incremental_field_last_value"] == "2024-05-01T00:00:00Z"
 
+    @mock.patch(f"{_MODULE}.amazon_selling_partner_token_provider")
+    @mock.patch.object(AmazonSellingPartnerSource, "get_oauth_integration")
     @mock.patch(f"{_MODULE}.amazon_selling_partner_source")
-    def test_source_for_pipeline_omits_last_value_on_full_refresh(self, mock_source: mock.MagicMock) -> None:
+    def test_source_for_pipeline_omits_last_value_on_full_refresh(
+        self, mock_source: mock.MagicMock, mock_get_integration: mock.MagicMock, mock_provider: mock.MagicMock
+    ) -> None:
         inputs = mock.MagicMock()
         inputs.schema_name = "orders"
+        inputs.team_id = self.team_id
         inputs.should_use_incremental_field = False
         inputs.db_incremental_field_last_value = "2024-05-01T00:00:00Z"
 

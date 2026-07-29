@@ -7,9 +7,12 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common imp
 
 
 @config.config
+class AmazonSellingPartnerRegionConfig(config.Config):
+    amazon_selling_partner_integration_id: int = config.value(converter=config.str_to_int)
+    selection: Literal["na", "eu", "fe"] = "na"
+
+
+@config.config
 class AmazonSellingPartnerSourceConfig(config.Config):
+    region: AmazonSellingPartnerRegionConfig
     marketplace_ids: str
-    client_id: str
-    client_secret: str
-    refresh_token: str
-    region: Literal["na", "eu", "fe"] = config.value(default="na")

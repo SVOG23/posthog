@@ -5437,6 +5437,9 @@ export enum EventDefinitionType {
 
 export const INTEGRATION_KINDS = [
     'slack',
+    'amazon-selling-partner-na',
+    'amazon-selling-partner-eu',
+    'amazon-selling-partner-fe',
     'salesforce',
     'hubspot',
     'google-pubsub',

@@ -51,8 +51,12 @@ def _response(
     return response
 
 
-def _token_response(expires_in: int = 3600) -> mock.MagicMock:
-    return _response({"access_token": "access-token", "expires_in": expires_in})
+def _token_provider(*tokens: str) -> mock.MagicMock:
+    """Stand in for the integration row: hands back a token, and a fresh one when forced."""
+    provider = mock.MagicMock()
+    provider.side_effect = list(tokens) if len(tokens) > 1 else None
+    provider.return_value = tokens[0] if tokens else "access-token"
+    return provider
 
 
 def _make_manager(resume_state: Optional[AmazonSellingPartnerResumeConfig] = None) -> mock.MagicMock:
@@ -62,16 +66,14 @@ def _make_manager(resume_state: Optional[AmazonSellingPartnerResumeConfig] = Non
     return manager
 
 
-def _client() -> SellingPartnerClient:
-    return SellingPartnerClient("na", "cid", "secret", "refresh")
+def _client(access_token_provider: Optional[mock.MagicMock] = None) -> SellingPartnerClient:
+    return SellingPartnerClient("na", access_token_provider or _token_provider())
 
 
 def _collect(endpoint: str, **kwargs: Any) -> list[list[dict[str, Any]]]:
     params: dict[str, Any] = {
         "region": "na",
-        "client_id": "cid",
-        "client_secret": "secret",
-        "refresh_token": "refresh",
+        "access_token_provider": _token_provider(),
         "marketplace_ids": "ATVPDKIKX0DER",
         "endpoint": endpoint,
         "logger": mock.MagicMock(),
@@ -170,41 +172,32 @@ class TestTokenLifecycle:
         assert mock_session.call_args.kwargs["capture"] is False
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
-    def test_token_is_reused_until_it_expires(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
-        client = _client()
+    def test_token_is_cached_rather_than_read_per_request(self, mock_session: mock.MagicMock) -> None:
+        # Every request would otherwise hit Postgres for the integration row.
+        provider = _token_provider()
+        client = _client(provider)
 
         assert client.access_token() == "access-token"
         assert client.access_token() == "access-token"
 
-        assert mock_session.return_value.post.call_count == 1
+        assert provider.call_count == 1
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
-    def test_token_is_reminted_once_expired(self, mock_session: mock.MagicMock) -> None:
-        # An already-elapsed lifetime means the very next call has to re-mint.
-        mock_session.return_value.post.return_value = _token_response(expires_in=0)
-        client = _client()
-
-        client.access_token()
-        client.access_token()
-
-        assert mock_session.return_value.post.call_count == 2
-
-    @mock.patch(f"{_MODULE}.make_tracked_session")
-    def test_401_remints_the_token_and_retries_once(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
+    def test_401_forces_a_fresh_token_and_retries_once(self, mock_session: mock.MagicMock) -> None:
+        provider = _token_provider("stale-token", "fresh-token")
         mock_session.return_value.request.side_effect = [
             _response(status=401),
             _response({"payload": {"Orders": []}}),
         ]
-        client = _client()
+        client = _client(provider)
 
         assert client.request("GET", "/orders/v0/orders") == {"payload": {"Orders": []}}
-        assert mock_session.return_value.post.call_count == 2
+        assert [call.args[0] for call in provider.call_args_list] == [False, True]
+        retried_call = mock_session.return_value.request.call_args_list[1]
+        assert retried_call.kwargs["headers"]["x-amz-access-token"] == "fresh-token"
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_persistent_401_raises_the_http_error(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response(status=401)
         client = _client()
 
@@ -214,7 +207,6 @@ class TestTokenLifecycle:
     @pytest.mark.parametrize("status", [429, 500, 503])
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_throttles_and_server_errors_are_retryable(self, mock_session: mock.MagicMock, status: int) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response(status=status)
         client = _client()
 
@@ -223,7 +215,6 @@ class TestTokenLifecycle:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_transient_error_is_retried_until_it_succeeds(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response(status=429),
             _response({"payload": {"Orders": []}}),
@@ -245,34 +236,36 @@ class TestValidateCredentials:
     )
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_status_mapping(self, mock_session: mock.MagicMock, status: int, expected_valid: bool) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response(status=status)
 
-        is_valid, _ = validate_credentials("na", "cid", "secret", "refresh")
+        is_valid, _ = validate_credentials("na", _token_provider())
 
         assert is_valid is expected_valid
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_token_failure_reports_the_credential_problem(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _response(status=400)
+        provider = mock.MagicMock(side_effect=ValueError("Amazon Selling Partner access token not found"))
 
-        is_valid, error = validate_credentials("na", "cid", "secret", "refresh")
+        is_valid, error = validate_credentials("na", provider)
 
         assert is_valid is False
         assert error is not None
-        assert "refresh token" in error
+        assert "Reconnect your Amazon seller account" in error
+        mock_session.return_value.request.assert_not_called()
 
     def test_unknown_region_is_rejected_without_any_request(self) -> None:
-        is_valid, error = validate_credentials("uk", "cid", "secret", "refresh")
+        provider = _token_provider()
+
+        is_valid, error = validate_credentials("uk", provider)
 
         assert is_valid is False
         assert error is not None
+        provider.assert_not_called()
 
 
 class TestOrders:
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_paginates_with_the_token_alone_after_the_first_page(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"payload": {"Orders": [{"AmazonOrderId": "1"}], "NextToken": "t1"}}),
             _response({"payload": {"Orders": [{"AmazonOrderId": "2"}]}}),
@@ -291,7 +284,6 @@ class TestOrders:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_incremental_run_sends_the_watermark_as_last_updated_after(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response({"payload": {"Orders": []}})
 
         _collect(
@@ -305,7 +297,6 @@ class TestOrders:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_full_refresh_sends_no_time_filter(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response({"payload": {"Orders": []}})
 
         _collect("orders", should_use_incremental_field=False, db_incremental_field_last_value="2024-05-01")
@@ -314,7 +305,6 @@ class TestOrders:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_resumes_from_the_saved_page_token(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response({"payload": {"Orders": []}})
         manager = _make_manager(AmazonSellingPartnerResumeConfig(next_token="saved"))
 
@@ -324,7 +314,6 @@ class TestOrders:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_pagination_stops_when_the_token_repeats(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response(
             {"payload": {"Orders": [{"AmazonOrderId": "1"}], "NextToken": "stuck"}}
         )
@@ -336,7 +325,6 @@ class TestOrders:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_empty_page_saves_no_resume_state(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response({"payload": {"Orders": []}})
         manager = _make_manager()
 
@@ -351,7 +339,6 @@ class TestOrders:
 class TestOrderItems:
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_fans_out_per_order_and_injects_parent_fields(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response(
                 {
@@ -387,7 +374,6 @@ class TestOrderItems:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_orders_without_an_id_are_skipped(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response(
             {"payload": {"Orders": [{"OrderStatus": "Shipped"}]}}
         )
@@ -397,7 +383,6 @@ class TestOrderItems:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_parent_watermark_is_pushed_into_the_orders_query(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response({"payload": {"Orders": []}})
 
         _collect(
@@ -414,7 +399,6 @@ class TestOrderItems:
 class TestFbaInventory:
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_walks_each_marketplace_and_tags_the_rows(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"payload": {"inventorySummaries": [{"sellerSku": "sku-1"}]}}),
             _response({"payload": {"inventorySummaries": [{"sellerSku": "sku-2"}]}}),
@@ -434,7 +418,6 @@ class TestFbaInventory:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_paginates_on_the_top_level_pagination_token(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response(
                 {
@@ -456,7 +439,6 @@ class TestFbaInventory:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_resume_skips_the_marketplaces_already_finished(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response({"payload": {"inventorySummaries": []}})
         manager = _make_manager(AmazonSellingPartnerResumeConfig(next_token="saved", marketplace_id="M2"))
 
@@ -469,7 +451,6 @@ class TestFbaInventory:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_resume_token_for_an_unknown_marketplace_is_discarded(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.return_value = _response({"payload": {"inventorySummaries": []}})
         manager = _make_manager(AmazonSellingPartnerResumeConfig(next_token="saved", marketplace_id="GONE"))
 
@@ -489,7 +470,6 @@ class TestSalesAndTrafficReport:
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_creates_polls_downloads_and_yields_rows(self, mock_session: mock.MagicMock) -> None:
         rows = [{"date": "2024-05-01", "salesByDate": {}, "trafficByDate": {}}]
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"reportId": "R1"}),
             _response({"processingStatus": "IN_QUEUE"}),
@@ -518,7 +498,6 @@ class TestSalesAndTrafficReport:
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_report_download_disables_http_sample_capture(self, mock_session: mock.MagicMock) -> None:
         rows = [{"date": "2024-05-01"}]
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"reportId": "R1"}),
             _response({"processingStatus": "DONE", "reportDocumentId": "D1"}),
@@ -542,7 +521,6 @@ class TestSalesAndTrafficReport:
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_uncompressed_document_is_parsed_too(self, mock_session: mock.MagicMock) -> None:
         rows = [{"date": "2024-05-01"}]
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"reportId": "R1"}),
             _response({"processingStatus": "DONE", "reportDocumentId": "D1"}),
@@ -562,7 +540,6 @@ class TestSalesAndTrafficReport:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_cancelled_report_yields_nothing(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"reportId": "R1"}),
             _response({"processingStatus": "CANCELLED"}),
@@ -578,7 +555,6 @@ class TestSalesAndTrafficReport:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_fatal_report_raises(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"reportId": "R1"}),
             _response({"processingStatus": "FATAL"}),
@@ -594,7 +570,6 @@ class TestSalesAndTrafficReport:
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_resume_reuses_the_in_flight_report(self, mock_session: mock.MagicMock) -> None:
         window_start = _format_timestamp(self._recent_watermark())
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"processingStatus": "DONE", "reportDocumentId": "D1"}),
             _response({"url": "https://s3.example/doc", "compressionAlgorithm": "GZIP"}),
@@ -611,7 +586,6 @@ class TestSalesAndTrafficReport:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_backfill_is_sliced_into_windows(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [
             _response({"reportId": "R1"}),
             _response({"processingStatus": "CANCELLED"}),
@@ -632,7 +606,6 @@ class TestSalesAndTrafficReport:
 
     @mock.patch(f"{_MODULE}.make_tracked_session")
     def test_report_that_never_finishes_becomes_retryable(self, mock_session: mock.MagicMock) -> None:
-        mock_session.return_value.post.return_value = _token_response()
         mock_session.return_value.request.side_effect = [_response({"reportId": "R1"})] + [
             _response({"processingStatus": "IN_PROGRESS"}) for _ in range(200)
         ]
@@ -652,9 +625,7 @@ class TestSourceResponse:
 
         response = amazon_selling_partner_source(
             region="na",
-            client_id="cid",
-            client_secret="secret",
-            refresh_token="refresh",
+            access_token_provider=_token_provider(),
             marketplace_ids="ATVPDKIKX0DER",
             endpoint=endpoint,
             logger=mock.MagicMock(),
