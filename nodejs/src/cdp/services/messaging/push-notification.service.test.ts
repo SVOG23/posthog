@@ -164,7 +164,7 @@ describe('PushNotificationService', () => {
 
             await service.executeSendPushNotification(invocation)
 
-            const body = JSON.parse(mockTrackedFetch.mock.calls[0][0].fetchParams.body)
+            const body = parseJSON(mockTrackedFetch.mock.calls[0][0].fetchParams.body)
             expect(body.message.data).toMatchObject({
                 posthog_workflow_id: invocation.functionId,
                 posthog_action_id: 'push-step',
@@ -191,7 +191,7 @@ describe('PushNotificationService', () => {
 
             await service.executeSendPushNotification(invocation)
 
-            const body = JSON.parse(mockTrackedFetch.mock.calls[0][0].fetchParams.body)
+            const body = parseJSON(mockTrackedFetch.mock.calls[0][0].fetchParams.body)
             expect(body.message.data.posthog_workflow_id).toBe(invocation.functionId)
         })
 
