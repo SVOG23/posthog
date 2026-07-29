@@ -1,6 +1,6 @@
-import asyncio
 import sys
 import time
+import asyncio
 from typing import Any, Generic, Literal
 
 import pyarrow as pa
