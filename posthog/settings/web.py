@@ -622,6 +622,8 @@ SPECTACULAR_SETTINGS = {
         "TargetTypeEnum": "products.exports.backend.models.subscription.Subscription.SubscriptionTarget",
         # --- Inline value lists (type-hint enums, no x-spec-enum-id) ---
         "PropertyGroupOperator": ["AND", "OR"],
+        # `bucket` is a generic field name; name the experiment recordings bucket set explicitly.
+        "ExperimentSessionBucketEnum": ["fired_any", "no_metric_activity", "funnel_dropoff"],
         # ReviewHog findings expose the same priority set on two fields (effective_priority +
         # reviewer_priority); pin one shared name for the choice set.
         "ReviewIssuePriorityEnum": ["must_fix", "should_fix", "consider"],
