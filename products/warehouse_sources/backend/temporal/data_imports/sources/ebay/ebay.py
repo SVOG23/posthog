@@ -104,7 +104,9 @@ def build_windows(
         windows.append((cursor, end))
         cursor = end
 
-    return windows or [(start, now)]
+    if not windows:
+        windows.append((start, now))
+    return windows
 
 
 def window_key(window: Window) -> Optional[str]:
@@ -130,9 +132,11 @@ class EbayClient:
         self._logger = logger
         self._token_refresher = token_refresher
         self._token = access_token
-        # The token only ever rides the Authorization header, which the tracked transport
-        # already redacts by name, so it needs no extra `redact_values` entry.
-        self._session = make_tracked_session()
+        # Order, transaction, and payout responses carry buyer and seller PII (addresses,
+        # notes, payout instruments) that the name-based scrubbers cannot reliably sanitise,
+        # so keep these bodies out of the shared HTTP sample store. The access token only
+        # ever rides the Authorization header, which the transport already redacts by name.
+        self._session = make_tracked_session(capture=False)
 
     def _headers(self) -> dict[str, str]:
         return {

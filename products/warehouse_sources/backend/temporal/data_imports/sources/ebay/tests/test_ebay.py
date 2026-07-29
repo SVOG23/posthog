@@ -244,6 +244,18 @@ class TestEbayClient:
         self._client(session).get("/sell/fulfillment/v1/order", {})
         assert session.gets[0]["headers"]["Authorization"] == "Bearer tok-1"
 
+    def test_no_session_captures_http_samples(self) -> None:
+        # Order/transaction/payout bodies carry buyer and seller PII, so no session the
+        # client builds may write responses to the shared HTTP sample store.
+        with patch(
+            "products.warehouse_sources.backend.temporal.data_imports.sources.ebay.ebay.make_tracked_session",
+            return_value=_FakeSession(),
+        ) as make_session:
+            EbayClient("tok-1", "EBAY_US", MagicMock())
+        assert make_session.call_count >= 1
+        for call in make_session.call_args_list:
+            assert call.kwargs.get("capture") is False
+
     def test_expired_token_is_reminted_once_mid_sync(self) -> None:
         # User access tokens last two hours, which a large backfill outlives; a 401 must
         # refresh through the integration rather than fail the job.
