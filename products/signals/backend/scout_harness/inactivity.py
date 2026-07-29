@@ -124,7 +124,8 @@ def sweep_inactive_scouts(now: datetime | None = None) -> SweepOutcome:
     for team_id, configs in by_team.items():
         outcome.considered += len(configs)
         try:
-            productive, judgeable = _assess_team(team_id, [c.skill_name for c in configs], now)
+            assessment = _assess_team(team_id, [c.skill_name for c in configs], now)
+            productive, judgeable, has_past_output = assessment
         except Exception:
             # One team's data problem must not cost the rest of the fleet its sweep.
             logger.exception("signals_scout inactivity sweep: team assessment failed", team_id=team_id)
@@ -143,17 +144,27 @@ def sweep_inactive_scouts(now: datetime | None = None) -> SweepOutcome:
                 _warn(config, now)
                 outcome.warned.append(config)
             elif now - config.auto_pause_warned_at >= WARNING_GRACE:
-                _pause(config, now)
+                # Two shapes of the same waste, separated because they call for different fixes:
+                # a scout whose reports nobody picks up needs retuning, one that finds nothing at
+                # all may be watching a surface this project doesn't have.
+                reason = (
+                    SignalScoutConfig.AutoPauseReason.IGNORED
+                    if config.skill_name in has_past_output
+                    else SignalScoutConfig.AutoPauseReason.NO_OUTPUT
+                )
+                _pause(config, now, reason)
                 outcome.paused.append(config)
 
     return outcome
 
 
-def _assess_team(team_id: int, skill_names: list[str], now: datetime) -> tuple[set[str], set[str]]:
-    """Return `(productive skills, judgeable skills)` for one team.
+def _assess_team(team_id: int, skill_names: list[str], now: datetime) -> tuple[set[str], set[str], set[str]]:
+    """Return `(productive, judgeable, has_past_output)` skill-name sets for one team.
 
     Judgeable means the scout ran often enough in the window for "it found nothing" to mean
-    anything; productive means it passed either half of the productivity test.
+    anything; productive means it passed either half of the productivity test; has_past_output
+    means it wrote reports before the window, which is what separates an ignored scout from one
+    that never surfaces anything.
     """
     window_start = now - INACTIVITY_WINDOW
     runs = SignalScoutRun.all_teams.filter(
@@ -185,7 +196,7 @@ def _assess_team(team_id: int, skill_names: list[str], now: datetime) -> tuple[s
     if pending:
         engaged = _engaged_report_ids(team_id, set().union(*pending.values()), window_start)
         productive.update(name for name, reports in pending.items() if reports & engaged)
-    return productive, judgeable
+    return productive, judgeable, set(touched_before_window)
 
 
 def _engaged_report_ids(team_id: int, report_ids: set[str], window_start: datetime) -> set[str]:
@@ -230,10 +241,10 @@ def _clear_warning(config: SignalScoutConfig) -> None:
     config.save(update_fields=["auto_pause_warned_at", "updated_at"])
 
 
-def _pause(config: SignalScoutConfig, now: datetime) -> None:
+def _pause(config: SignalScoutConfig, now: datetime, reason: str) -> None:
     config.enabled = False
     config.auto_paused_at = now
-    config.auto_pause_reason = SignalScoutConfig.AutoPauseReason.INACTIVE
+    config.auto_pause_reason = reason
     config.auto_pause_warned_at = None
     # No acting user: the sweep is the actor, so the activity entry is attributed to the job via the
     # trigger rather than pinned on whoever happened to enable the scout months ago.

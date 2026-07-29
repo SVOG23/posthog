@@ -17,7 +17,7 @@ class Migration(migrations.Migration):
             name="auto_pause_reason",
             field=models.CharField(
                 blank=True,
-                choices=[("inactive", "No output or engagement")],
+                choices=[("no_output", "No output"), ("ignored", "Output ignored")],
                 max_length=40,
                 null=True,
             ),

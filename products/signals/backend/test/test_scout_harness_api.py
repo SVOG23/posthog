@@ -1363,7 +1363,7 @@ class TestScoutHarnessConfigAPI(APIBaseTest):
             skill_name="signals-scout-foo",
             enabled=False,
             auto_paused_at=timezone.now(),
-            auto_pause_reason=SignalScoutConfig.AutoPauseReason.INACTIVE,
+            auto_pause_reason=SignalScoutConfig.AutoPauseReason.NO_OUTPUT,
             auto_pause_warned_at=timezone.now(),
         )
 

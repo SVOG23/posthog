@@ -542,6 +542,7 @@ def pause_inactive_signal_scouts() -> None:
                         "organization_id": str(organization.id),
                         "skill_name": config.skill_name,
                         "run_interval_minutes": config.run_interval_minutes,
+                        "auto_pause_reason": config.auto_pause_reason,
                     },
                     groups=groups(organization=organization),
                 )

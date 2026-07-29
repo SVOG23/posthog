@@ -89,7 +89,19 @@ class TestScoutInactivitySweep(BaseTest):
         assert [c.pk for c in outcome.paused] == [self.config.pk]
         assert paused.enabled is False
         assert paused.auto_paused_at is not None
-        assert paused.auto_pause_reason == SignalScoutConfig.AutoPauseReason.INACTIVE
+        assert paused.auto_pause_reason == SignalScoutConfig.AutoPauseReason.NO_OUTPUT
+
+    def test_a_scout_whose_older_reports_went_unread_is_paused_as_ignored(self) -> None:
+        # Separated from `no_output` because the two want different fixes: retune a scout whose
+        # reports nobody picks up, retire one that never finds anything.
+        report = self._report()
+        self._runs(1, age=INACTIVITY_WINDOW + timedelta(days=5), emitted_report_ids=[str(report.id)])
+        self._silent_runs()
+
+        sweep_inactive_scouts(now=self.now)
+        sweep_inactive_scouts(now=self.now + WARNING_GRACE)
+
+        assert self._reload().auto_pause_reason == SignalScoutConfig.AutoPauseReason.IGNORED
 
     def test_pause_is_activity_logged_without_pinning_it_on_a_user(self) -> None:
         self._silent_runs()

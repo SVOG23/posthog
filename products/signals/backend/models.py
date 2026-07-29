@@ -1094,7 +1094,10 @@ class SignalScoutConfig(ModelActivityMixin, TeamScopedRootMixin, UUIDModel):
     """
 
     class AutoPauseReason(models.TextChoices):
-        INACTIVE = "inactive", "No output or engagement"
+        # It has been surfacing nothing at all.
+        NO_OUTPUT = "no_output", "No output"
+        # It surfaced reports earlier, but nobody has picked any of them up since.
+        IGNORED = "ignored", "Output ignored"
 
     # ModelActivityMixin only logs deletes when this is set.
     activity_logging_on_delete = True
