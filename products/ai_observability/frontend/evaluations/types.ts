@@ -13,6 +13,7 @@ export type EvaluationType = 'llm_judge' | 'hog' | 'sentiment'
 export type EvaluationRuntime = EvaluationType | 'otel'
 export type EvaluationSource = 'online' | 'imported'
 export type EvaluationTarget = 'generation' | 'trace'
+export type EvaluationSettleStrategy = 'fixed_window' | 'inactivity'
 export type EvaluationOutputType = 'boolean' | 'sentiment'
 export type EvaluationResultType = EvaluationOutputType | 'label' | 'number'
 export type EvaluationStatus = 'active' | 'paused' | 'error'
@@ -38,9 +39,16 @@ export interface EvaluationOutputConfig {
     allows_na?: boolean
 }
 
+/** Settle config for aggregate targets. Rows saved before strategies existed have no
+ * `strategy` key and mean 'fixed_window'. */
 export interface EvaluationTargetConfig {
-    /** For 'trace' target: seconds to wait after the first matching generation before evaluating the trace. */
+    strategy?: EvaluationSettleStrategy
+    /** fixed_window: seconds to wait after the first matching generation before evaluating. */
     window_seconds?: number
+    /** inactivity: seconds without new trace activity before the trace counts as settled. */
+    quiet_period_seconds?: number
+    /** inactivity: hard cap in seconds on the total wait from the first matching generation. */
+    max_age_seconds?: number
 }
 
 export interface LLMJudgeEvaluationConfig {
@@ -69,7 +77,7 @@ export interface BaseEvaluationConfig {
     conditions: EvaluationConditionSet[]
     /** What the evaluation runs on: each matching generation event, or the whole trace once. */
     target: EvaluationTarget
-    /** Target-specific settings. For 'trace': {window_seconds}. Empty for 'generation'. */
+    /** Target-specific settings — see EvaluationTargetConfig. Empty for 'generation'. */
     target_config: EvaluationTargetConfig
     model_configuration: ModelConfiguration | null
     total_runs: number
