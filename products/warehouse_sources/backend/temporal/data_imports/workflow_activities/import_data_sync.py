@@ -14,6 +14,7 @@ from posthog.clickhouse.query_tagging import Feature, Product, tag_queries
 from posthog.models.integration import UndecryptedIntegrationSecretError
 from posthog.sync import database_sync_to_async_pool
 from posthog.temporal.common.activity_context import current_activity_attempt
+from posthog.temporal.common.errors import NonReportableError
 from posthog.temporal.common.heartbeat import LivenessHeartbeater as Heartbeater
 from posthog.temporal.common.logger import get_logger
 from posthog.temporal.common.shutdown import ShutdownMonitor
@@ -34,6 +35,9 @@ from products.warehouse_sources.backend.temporal.data_imports.pipelines.common.e
 )
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.arrow_utils import (
     SchemaColumnTypeChangedException,
+)
+from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta_table_helper import (
+    is_transient_object_store_error,
 )
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.typings import PipelineResult
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline_sync import PipelineInputs
@@ -328,7 +332,10 @@ async def _handle_import_error(
     the source's own retries are exhausted. Temporal retries the whole activity and the error is
     transient and self-recovering, so we log at ``warning`` rather than ``exception`` to keep
     this benign, recoverable failure out of error tracking. ``RESTClientRetryableError`` gets the
-    same treatment by type, since every REST-based source hits that condition already.
+    same treatment by type, since every REST-based source hits that condition already. A transient
+    object-store hiccup talking to our own data-warehouse bucket is re-raised as
+    ``NonReportableError`` instead, since the activity interceptor only skips reporting for that
+    marker type — logging level alone doesn't suppress capture.
 
     Everything else is logged as an exception and re-raised so Temporal retries it as usual.
     """
@@ -373,6 +380,15 @@ async def _handle_import_error(
         await logger.awarning(error_msg)
         await logger.adebug("REST client exhausted its retries - re-raising for Temporal retry")
         raise error
+
+    # A transient S3/object-store hiccup talking to our own data-warehouse bucket (IMDS/STS
+    # blip, SlowDown throttling) that surfaced during this run — e.g. resetting or opening the
+    # Delta table. Not a PostHog defect and not a customer credential problem (see
+    # TRANSIENT_OBJECT_STORE_ERRORS), and retrying resolves it, so it shouldn't page anyone.
+    if is_transient_object_store_error(error):
+        await logger.awarning(error_msg)
+        await logger.adebug("Transient object-store error - re-raising for Temporal retry")
+        raise NonReportableError(error_msg) from error
 
     non_retryable_errors = source_cls.get_non_retryable_errors()
     if any(match in error_msg for match in non_retryable_errors):

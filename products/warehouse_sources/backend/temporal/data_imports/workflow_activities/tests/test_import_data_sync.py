@@ -5,6 +5,8 @@ from datetime import datetime
 import pytest
 from unittest import mock
 
+from posthog.temporal.common.errors import NonReportableError
+
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.arrow_utils import (
     SchemaColumnTypeChangedException,
 )
@@ -211,6 +213,33 @@ async def test_rest_client_retryable_error_logged_as_warning_without_source_opt_
         with pytest.raises(RESTClientRetryableError):
             await module._handle_import_error(mock.MagicMock(), logger, error)
 
+    logger.awarning.assert_awaited_once()
+    logger.aexception.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_object_store_error_reraised_as_non_reportable():
+    # A transient S3 credential-provider blip (IMDS/STS) talking to our own data-warehouse bucket,
+    # e.g. while resetting the Delta table. It's retryable (Temporal retries the activity as usual),
+    # but re-raising the bare OSError would still be captured by the activity interceptor, which
+    # only skips reporting for NonReportableError — so it must be wrapped, not just logged at warning.
+    error = OSError(
+        "Operation not supported: the credential provider was not enabled: no providers in chain provided credentials"
+    )
+    source = mock.MagicMock(spec=SimpleSource)
+    source.get_non_retryable_errors.return_value = {}
+    source.get_retryable_errors.return_value = set()
+
+    logger = mock.MagicMock()
+    logger.awarning = mock.AsyncMock()
+    logger.aexception = mock.AsyncMock()
+    logger.adebug = mock.AsyncMock()
+
+    with mock.patch.object(module.SourceRegistry, "get_source", return_value=source):
+        with pytest.raises(NonReportableError) as exc_info:
+            await module._handle_import_error(mock.MagicMock(), logger, error)
+
+    assert exc_info.value.__cause__ is error
     logger.awarning.assert_awaited_once()
     logger.aexception.assert_not_awaited()
 
