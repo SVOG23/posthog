@@ -23,13 +23,15 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.linkedin_p
 )
 
 LINKEDIN_API_BASE_URL = "https://api.linkedin.com/rest"
-LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 # LinkedIn's Marketing/Community Management APIs are versioned by month (YYYYMM) via a required
 # header, and each version sunsets about a year after release.
 LINKEDIN_API_VERSION = "202606"
 RESTLI_PROTOCOL_VERSION = "2.0.0"
 
 ORGANIZATION_ACLS_PATH = "/organizationAcls"
+ORGANIZATIONS_LOOKUP_PATH = "/organizationsLookup"
+# `organizationsLookup` is a Rest.li batch get, so the id list has to stay inside the URL length limit.
+ORGANIZATION_LOOKUP_BATCH_SIZE = 50
 
 PAGE_SIZE = 100
 REQUEST_TIMEOUT_SECONDS = 60
@@ -75,8 +77,12 @@ class LinkedinPagesApiError(Exception):
         self.api_status_code = api_status_code
 
 
-class LinkedinPagesTokenRefreshError(Exception):
-    """The supplied OAuth credentials could not be exchanged for an access token."""
+@dataclasses.dataclass(frozen=True)
+class AdministeredOrganization:
+    """One LinkedIn page the authorized member administers, as offered in the source form."""
+
+    urn: str
+    name: str
 
 
 @dataclasses.dataclass
@@ -130,17 +136,15 @@ def time_intervals_param(window_start: dt.date, window_end: dt.date) -> str:
     )
 
 
-def organization_urns_from_config(raw: str | None) -> list[str]:
-    """Parse the optional organization ID field into URNs.
+def organization_urns_from_config(raw: list[str] | None) -> list[str]:
+    """Normalize the selected organizations into URNs.
 
-    Accepts a comma-separated list of numeric IDs, and passes through anything already written as
-    a URN (showcase pages are `urn:li:organizationBrand:…`, not `urn:li:organization:…`).
+    The page picker stores URNs, but a bare numeric ID is accepted too so a value typed or migrated
+    in by hand still resolves. Anything already written as a URN passes through, since showcase
+    pages are `urn:li:organizationBrand:…` rather than `urn:li:organization:…`.
     """
-    if not raw:
-        return []
-
     urns: list[str] = []
-    for part in raw.split(","):
+    for part in raw or []:
         value = part.strip()
         if not value:
             continue
@@ -240,54 +244,15 @@ def window_start_from_watermark(last_value: Any, today: dt.date) -> dt.date:
 class LinkedinPagesClient:
     """Rest.li client for LinkedIn's Community Management (organization page) APIs."""
 
-    def __init__(
-        self,
-        client_id: str,
-        client_secret: str,
-        refresh_token: str,
-        api_version: str = LINKEDIN_API_VERSION,
-    ) -> None:
-        self._client_id = client_id
-        self._client_secret = client_secret
-        self._refresh_token = refresh_token
+    def __init__(self, access_token: str, api_version: str = LINKEDIN_API_VERSION) -> None:
+        self._access_token = access_token
         self._api_version = api_version
-        self._access_token: Optional[str] = None
         # capture=False: pulled bodies carry free-form customer content (post commentary,
         # organization details, demographic analytics) that the name-based sample scrubbers
-        # can't recognise. redact_values still masks the credentials in logged URLs.
-        self._session = make_tracked_session(redact_values=(client_secret, refresh_token), capture=False)
-        # The token exchange posts the client secret and refresh token in the body and gets an
-        # access token back, none of which the name-based sample scrubbers would recognise.
-        self._auth_session = make_tracked_session(redact_values=(client_secret, refresh_token), capture=False)
-
-    def _mint_access_token(self) -> str:
-        response = self._auth_session.post(
-            LINKEDIN_TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": self._refresh_token,
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        if not response.ok:
-            raise LinkedinPagesTokenRefreshError(
-                "Failed to refresh the LinkedIn access token. Check the client ID, client secret and "
-                f"refresh token (LinkedIn returned {response.status_code}: {response.text})."
-            )
-        try:
-            access_token = response.json().get("access_token")
-        except ValueError as e:
-            raise LinkedinPagesRetryableError("LinkedIn returned a malformed token response") from e
-
-        if not access_token:
-            raise LinkedinPagesTokenRefreshError("LinkedIn returned no access token for the supplied credentials")
-        return str(access_token)
+        # can't recognise. redact_values still masks the token in logged URLs and headers.
+        self._session = make_tracked_session(redact_values=(access_token,), capture=False)
 
     def _headers(self) -> dict[str, str]:
-        if self._access_token is None:
-            self._access_token = self._mint_access_token()
         return {
             "Authorization": f"Bearer {self._access_token}",
             "LinkedIn-Version": self._api_version,
@@ -308,10 +273,6 @@ class LinkedinPagesClient:
         anything that reaches here has already been given those attempts.
         """
         response = self._send(path, params)
-        if response.status_code == 401:
-            # Access tokens are short-lived; a sync can outlive the one it started with.
-            self._access_token = None
-            response = self._send(path, params)
 
         if response.status_code == 429:
             if is_daily_throttle(response.text):
@@ -373,6 +334,42 @@ class LinkedinPagesClient:
                     urns.add(organization)
         return sorted(urns)
 
+    def lookup_organization_names(self, urns: list[str]) -> dict[str, str]:
+        """Display names for the given organizations, keyed by URN.
+
+        `organizationsLookup` is a batch get that doesn't need administrator access, so one call
+        covers every page. Any organization it omits is simply left out.
+        """
+        names: dict[str, str] = {}
+        by_id = {organization_id_from_urn(urn): urn for urn in urns}
+        ids = list(by_id)
+
+        for start in range(0, len(ids), ORGANIZATION_LOOKUP_BATCH_SIZE):
+            batch = ids[start : start + ORGANIZATION_LOOKUP_BATCH_SIZE]
+            body = self.request(ORGANIZATIONS_LOOKUP_PATH, {"ids": f"List({','.join(batch)})"})
+            results = body.get("results")
+            if not isinstance(results, dict):
+                continue
+            for organization_id, organization in results.items():
+                name = organization.get("localizedName") if isinstance(organization, dict) else None
+                urn = by_id.get(str(organization_id))
+                if urn and name:
+                    names[urn] = str(name)
+        return names
+
+    def list_administered_organizations(self) -> list[AdministeredOrganization]:
+        urns = self.list_organization_urns()
+        try:
+            names = self.lookup_organization_names(urns)
+        except LinkedinPagesApiError:
+            # The picker is more useful listing bare page IDs than failing outright, and the URNs
+            # are already in hand at this point.
+            names = {}
+        return [
+            AdministeredOrganization(urn=urn, name=names.get(urn) or f"Page {organization_id_from_urn(urn)}")
+            for urn in urns
+        ]
+
     def get_organization(self, urn: str) -> dict[str, Any]:
         organization_id = organization_id_from_urn(urn)
         body = self.request(f"{organization_entity_path(urn)}/{organization_id}", {})
@@ -392,14 +389,12 @@ class LinkedinPagesClient:
 
 
 def probe_credentials(
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token: str,
     api_version: str = LINKEDIN_API_VERSION,
 ) -> tuple[bool, Optional[int]]:
     """Report `(is_valid, http status)`. Never raises — an unreachable API just isn't validated."""
     try:
-        LinkedinPagesClient(client_id, client_secret, refresh_token, api_version=api_version).probe()
+        LinkedinPagesClient(access_token, api_version=api_version).probe()
     except LinkedinPagesApiError as e:
         return False, e.api_status_code
     except Exception:  # noqa: BLE001 — a credential probe must never fail source creation
@@ -407,7 +402,7 @@ def probe_credentials(
     return True, 200
 
 
-def resolve_organization_urns(client: LinkedinPagesClient, configured: str | None) -> list[str]:
+def resolve_organization_urns(client: LinkedinPagesClient, configured: list[str] | None) -> list[str]:
     """Organizations to sync: the configured ones, else everything the member administers."""
     urns = organization_urns_from_config(configured)
     return sorted(urns) if urns else client.list_organization_urns()
@@ -481,10 +476,8 @@ def iter_pages(
 
 
 def linkedin_pages_source(
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
-    organization_id: str | None,
+    access_token: str,
+    organization_ids: list[str] | None,
     endpoint: str,
     resumable_source_manager: ResumableSourceManager[LinkedinPagesResumeConfig],
     logger: FilteringBoundLogger,
@@ -495,8 +488,8 @@ def linkedin_pages_source(
     config = LINKEDIN_PAGES_ENDPOINTS[endpoint]
 
     def get_rows() -> Iterator[pa.Table]:
-        client = LinkedinPagesClient(client_id, client_secret, refresh_token, api_version=api_version)
-        urns = resolve_organization_urns(client, organization_id)
+        client = LinkedinPagesClient(access_token, api_version=api_version)
+        urns = resolve_organization_urns(client, organization_ids)
         if not urns:
             logger.warning("linkedin_pages: the authorized member administers no organization pages")
             return

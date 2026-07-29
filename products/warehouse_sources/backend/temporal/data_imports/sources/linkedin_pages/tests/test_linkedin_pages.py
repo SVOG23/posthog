@@ -16,7 +16,6 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.linkedin_p
     LinkedinPagesDailyRateLimitError,
     LinkedinPagesResumeConfig,
     LinkedinPagesRetryableError,
-    LinkedinPagesTokenRefreshError,
     PageCursor,
     encode_restli_params,
     linkedin_pages_source,
@@ -50,13 +49,8 @@ def _response(status: int = 200, body: Any = None, text: Optional[str] = None) -
     return response
 
 
-def _token_response() -> Response:
-    return _response(body={"access_token": "at_1", "expires_in": 3600})
-
-
-def _session(get_responses: list[Response], token: Optional[Response] = None) -> mock.MagicMock:
+def _session(get_responses: list[Response]) -> mock.MagicMock:
     session = mock.MagicMock()
-    session.post.return_value = token if token is not None else _token_response()
     session.get.side_effect = get_responses
     return session
 
@@ -67,7 +61,7 @@ def _requested_urls(session: mock.MagicMock) -> list[str]:
 
 def _client(session: mock.MagicMock) -> LinkedinPagesClient:
     with mock.patch(SESSION_PATCH, return_value=session):
-        return LinkedinPagesClient("cid", "csecret", "rtoken")
+        return LinkedinPagesClient("at_1")
 
 
 def _manager(resume: Optional[LinkedinPagesResumeConfig] = None) -> mock.MagicMock:
@@ -121,14 +115,15 @@ class TestLinkedinPagesTransport:
         "raw, expected",
         [
             (None, []),
-            ("", []),
-            ("  ", []),
-            ("123", ["urn:li:organization:123"]),
-            ("123, 456", ["urn:li:organization:123", "urn:li:organization:456"]),
-            ("urn:li:organizationBrand:9", ["urn:li:organizationBrand:9"]),
+            ([], []),
+            (["  "], []),
+            (["123"], ["urn:li:organization:123"]),
+            (["123", " 456"], ["urn:li:organization:123", "urn:li:organization:456"]),
+            # The page picker stores URNs, and showcase pages aren't `urn:li:organization:`.
+            (["urn:li:organizationBrand:9"], ["urn:li:organizationBrand:9"]),
         ],
     )
-    def test_organization_urns_from_config(self, raw: Optional[str], expected: list[str]) -> None:
+    def test_organization_urns_from_config(self, raw: Optional[list[str]], expected: list[str]) -> None:
         assert organization_urns_from_config(raw) == expected
 
     @pytest.mark.parametrize(
@@ -144,7 +139,7 @@ class TestLinkedinPagesTransport:
     def test_organization_urns_from_config_rejects_non_numeric_ids(self, raw: str) -> None:
         # These would otherwise become URN path segments and retarget the authenticated request.
         with pytest.raises(ValueError):
-            organization_urns_from_config(raw)
+            organization_urns_from_config([raw])
 
     @pytest.mark.parametrize(
         "urn, expected",
@@ -243,35 +238,27 @@ class TestLinkedinPagesTransport:
 
         assert window_start_from_watermark(last_value, today) == today - dt.timedelta(days=INITIAL_LOOKBACK_DAYS)
 
-    def test_client_mints_a_token_once_and_sends_versioned_restli_headers(self) -> None:
-        session = _session([_response(body={"elements": []}), _response(body={"elements": []})])
+    def test_client_sends_the_integration_token_with_versioned_restli_headers(self) -> None:
+        session = _session([_response(body={"elements": []})])
         client = _client(session)
 
         client.request("/organizations/1", {})
-        client.request("/organizations/2", {})
 
-        assert session.post.call_count == 1
         headers = session.get.call_args.kwargs["headers"]
         assert headers["Authorization"] == "Bearer at_1"
         assert headers["LinkedIn-Version"] == "202606"
         assert headers["X-Restli-Protocol-Version"] == "2.0.0"
 
-    def test_client_remints_the_token_once_on_401(self) -> None:
-        session = _session([_response(status=401, body={}), _response(body={"elements": []})])
-        client = _client(session)
-
-        client.request("/organizations/1", {})
-
-        assert session.post.call_count == 2
-        assert session.get.call_count == 2
-
-    def test_client_raises_when_the_second_401_follows_a_fresh_token(self) -> None:
-        session = _session([_response(status=401, body={}), _response(status=401, body={"message": "bad"})])
+    def test_client_surfaces_a_401_instead_of_reauthenticating(self) -> None:
+        # The integration owns the token, so a 401 is for its refresh to fix, not the transport.
+        # Re-sending here would only burn LinkedIn's daily call budget.
+        session = _session([_response(status=401, body={"message": "bad"})])
         client = _client(session)
 
         with pytest.raises(LinkedinPagesApiError) as excinfo:
             client.request("/organizations/1", {})
 
+        assert session.get.call_count == 1
         assert excinfo.value.api_status_code == 401
         assert "LinkedIn API error (401)" in str(excinfo.value)
 
@@ -291,13 +278,6 @@ class TestLinkedinPagesTransport:
         client = _client(_session([_response(status=status, text=text)]))
 
         with pytest.raises(expected_exception):
-            client.request("/organizations/1", {})
-
-    def test_token_exchange_failure_is_reported_as_a_credentials_problem(self) -> None:
-        session = _session([], token=_response(status=400, body={"error": "invalid_grant"}))
-        client = _client(session)
-
-        with pytest.raises(LinkedinPagesTokenRefreshError):
             client.request("/organizations/1", {})
 
     def test_iter_finder_pages_walks_offsets_and_stops_on_a_short_page(self) -> None:
@@ -338,6 +318,32 @@ class TestLinkedinPagesTransport:
         # Resume state indexes into this list, so its order has to be deterministic.
         assert client.list_organization_urns() == [ORG_ONE, ORG_TWO]
 
+    def test_list_administered_organizations_labels_pages_with_their_name(self) -> None:
+        session = _session(
+            [
+                _response(body={"elements": [{"organization": ORG_TWO}, {"organization": ORG_ONE}]}),
+                _response(body={"results": {"1": {"localizedName": "Acme"}}}),
+            ]
+        )
+        client = _client(session)
+
+        organizations = client.list_administered_organizations()
+
+        assert [(org.urn, org.name) for org in organizations] == [(ORG_ONE, "Acme"), (ORG_TWO, "Page 2")]
+        # One batch call, with the Rest.li id list left unescaped.
+        assert "ids=List(1,2)" in _requested_urls(session)[1]
+
+    def test_list_administered_organizations_still_lists_pages_when_the_name_lookup_is_denied(self) -> None:
+        session = _session(
+            [
+                _response(body={"elements": [{"organization": ORG_ONE}]}),
+                _response(status=403, body={"message": "nope"}),
+            ]
+        )
+        client = _client(session)
+
+        assert [org.name for org in client.list_administered_organizations()] == ["Page 1"]
+
     @pytest.mark.parametrize(
         "status, expected",
         [
@@ -348,17 +354,15 @@ class TestLinkedinPagesTransport:
     )
     def test_probe_credentials_maps_status(self, status: int, expected: tuple[bool, Optional[int]]) -> None:
         body: dict[str, Any] = {"elements": []} if status == 200 else {"message": "nope"}
-        # A 401 costs two responses: the client re-mints its token and retries once.
-        responses = [_response(status=status, body=body) for _ in range(2)]
-        with mock.patch(SESSION_PATCH, return_value=_session(responses)):
-            assert probe_credentials("cid", "csecret", "rtoken") == expected
+        with mock.patch(SESSION_PATCH, return_value=_session([_response(status=status, body=body)])):
+            assert probe_credentials("at_1") == expected
 
     def test_probe_credentials_never_raises_on_transport_failure(self) -> None:
         session = mock.MagicMock()
-        session.post.side_effect = OSError("connection reset")
+        session.get.side_effect = OSError("connection reset")
 
         with mock.patch(SESSION_PATCH, return_value=session):
-            assert probe_credentials("cid", "csecret", "rtoken") == (False, None)
+            assert probe_credentials("at_1") == (False, None)
 
 
 class TestLinkedinPagesSourceResponse:
@@ -367,10 +371,8 @@ class TestLinkedinPagesSourceResponse:
         config = LINKEDIN_PAGES_ENDPOINTS[endpoint]
 
         response = linkedin_pages_source(
-            client_id="cid",
-            client_secret="csecret",
-            refresh_token="rtoken",
-            organization_id="1",
+            access_token="at_1",
+            organization_ids=["1"],
             endpoint=endpoint,
             resumable_source_manager=_manager(),
             logger=mock.MagicMock(),
@@ -394,10 +396,8 @@ class TestLinkedinPagesSourceResponse:
         with mock.patch(SESSION_PATCH, return_value=session):
             rows = _rows_from(
                 linkedin_pages_source(
-                    client_id="cid",
-                    client_secret="csecret",
-                    refresh_token="rtoken",
-                    organization_id="1,2",
+                    access_token="at_1",
+                    organization_ids=["1", "2"],
                     endpoint="page_statistics",
                     resumable_source_manager=_manager(),
                     logger=mock.MagicMock(),
@@ -421,10 +421,8 @@ class TestLinkedinPagesSourceResponse:
         with mock.patch(SESSION_PATCH, return_value=session):
             _rows_from(
                 linkedin_pages_source(
-                    client_id="cid",
-                    client_secret="csecret",
-                    refresh_token="rtoken",
-                    organization_id="1",
+                    access_token="at_1",
+                    organization_ids=["1"],
                     endpoint="follower_statistics",
                     resumable_source_manager=_manager(),
                     logger=mock.MagicMock(),
@@ -444,10 +442,8 @@ class TestLinkedinPagesSourceResponse:
         with mock.patch(SESSION_PATCH, return_value=session):
             _rows_from(
                 linkedin_pages_source(
-                    client_id="cid",
-                    client_secret="csecret",
-                    refresh_token="rtoken",
-                    organization_id="1",
+                    access_token="at_1",
+                    organization_ids=["1"],
                     endpoint="share_statistics",
                     resumable_source_manager=_manager(),
                     logger=mock.MagicMock(),
@@ -466,10 +462,8 @@ class TestLinkedinPagesSourceResponse:
         with mock.patch(SESSION_PATCH, return_value=session):
             rows = _rows_from(
                 linkedin_pages_source(
-                    client_id="cid",
-                    client_secret="csecret",
-                    refresh_token="rtoken",
-                    organization_id="1,2",
+                    access_token="at_1",
+                    organization_ids=["1", "2"],
                     endpoint="page_statistics",
                     resumable_source_manager=_manager(resume),
                     logger=mock.MagicMock(),
@@ -497,10 +491,8 @@ class TestLinkedinPagesSourceResponse:
             mock.patch(BATCHER_PATCH, lambda logger: Batcher(logger=logger, chunk_size=1)),
         ):
             response = linkedin_pages_source(
-                client_id="cid",
-                client_secret="csecret",
-                refresh_token="rtoken",
-                organization_id="1,2",
+                access_token="at_1",
+                organization_ids=["1", "2"],
                 endpoint="page_statistics",
                 resumable_source_manager=manager,
                 logger=mock.MagicMock(),
@@ -531,10 +523,8 @@ class TestLinkedinPagesSourceResponse:
         with mock.patch(SESSION_PATCH, return_value=session):
             rows = _rows_from(
                 linkedin_pages_source(
-                    client_id="cid",
-                    client_secret="csecret",
-                    refresh_token="rtoken",
-                    organization_id="1,2",
+                    access_token="at_1",
+                    organization_ids=["1", "2"],
                     endpoint="page_statistics",
                     resumable_source_manager=_manager(),
                     logger=logger,
@@ -557,10 +547,8 @@ class TestLinkedinPagesSourceResponse:
         with mock.patch(SESSION_PATCH, return_value=session):
             rows = _rows_from(
                 linkedin_pages_source(
-                    client_id="cid",
-                    client_secret="csecret",
-                    refresh_token="rtoken",
-                    organization_id=None,
+                    access_token="at_1",
+                    organization_ids=None,
                     endpoint="organizations",
                     resumable_source_manager=_manager(),
                     logger=mock.MagicMock(),
@@ -582,10 +570,8 @@ class TestLinkedinPagesSourceResponse:
         with mock.patch(SESSION_PATCH, return_value=session):
             rows = _rows_from(
                 linkedin_pages_source(
-                    client_id="cid",
-                    client_secret="csecret",
-                    refresh_token="rtoken",
-                    organization_id="1",
+                    access_token="at_1",
+                    organization_ids=["1"],
                     endpoint="posts",
                     resumable_source_manager=_manager(),
                     logger=mock.MagicMock(),
@@ -606,10 +592,8 @@ class TestLinkedinPagesSourceResponse:
         with mock.patch(SESSION_PATCH, return_value=session):
             rows = _rows_from(
                 linkedin_pages_source(
-                    client_id="cid",
-                    client_secret="csecret",
-                    refresh_token="rtoken",
-                    organization_id=None,
+                    access_token="at_1",
+                    organization_ids=None,
                     endpoint="page_statistics",
                     resumable_source_manager=_manager(),
                     logger=logger,
