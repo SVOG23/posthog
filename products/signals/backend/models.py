@@ -1093,6 +1093,9 @@ class SignalScoutConfig(ModelActivityMixin, TeamScopedRootMixin, UUIDModel):
     dogfood program is gated by the `signals-scout` flag at the coordinator, not here.
     """
 
+    class AutoPauseReason(models.TextChoices):
+        INACTIVE = "inactive", "No output or engagement"
+
     # ModelActivityMixin only logs deletes when this is set.
     activity_logging_on_delete = True
 
@@ -1173,6 +1176,23 @@ class SignalScoutConfig(ModelActivityMixin, TeamScopedRootMixin, UUIDModel):
         blank=True,
         related_name="+",
     )
+    # Inactivity auto-pause (see `scout_harness/inactivity.py`). A scout that produces nothing and
+    # whose output nobody engages with keeps paying for sandbox runs forever, because `enabled` only
+    # ever moves by hand. The daily sweep warns first (`auto_pause_warned_at`) and then flips
+    # `enabled` off, recording when and why here so the fleet UI can explain the pause and offer a
+    # one-click re-enable — the update serializer clears all three the moment a user switches the
+    # scout back on, so a resumed scout starts from a clean slate rather than one grace period from
+    # being paused again.
+    auto_paused_at = models.DateTimeField(null=True, blank=True)
+    auto_pause_reason = models.CharField(max_length=40, choices=AutoPauseReason, null=True, blank=True)
+    # Stamped on the first sweep that finds a scout inactive; the pause lands only if it is still
+    # inactive a grace period later. Bookkeeping, so it's excluded from activity logging.
+    auto_pause_warned_at = models.DateTimeField(null=True, blank=True)
+    # Opt-out for deliberately low-signal scouts — a watchdog whose whole value is staying quiet
+    # (health checks, inbox validation) is *supposed* to emit nothing most weeks, so the sweep must
+    # never touch it. `db_default` alongside `default` keeps the AddField non-blocking and the
+    # column populated for writers that don't know about it yet.
+    auto_pause_exempt = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         verbose_name = "Signal scout config"

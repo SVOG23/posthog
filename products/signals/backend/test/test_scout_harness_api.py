@@ -1355,6 +1355,38 @@ class TestScoutHarnessConfigAPI(APIBaseTest):
         assert config.run_interval_minutes == 60
         assert config.enabled_by_id == self.user.id
 
+    def test_re_enabling_an_auto_paused_scout_clears_the_pause(self) -> None:
+        # Re-enabling is the one-click undo for an inactivity pause: leaving the pause state behind
+        # would show the resumed scout as paused and put it a single sweep from being paused again.
+        config = SignalScoutConfig.objects.create(
+            team=self.team,
+            skill_name="signals-scout-foo",
+            enabled=False,
+            auto_paused_at=timezone.now(),
+            auto_pause_reason=SignalScoutConfig.AutoPauseReason.INACTIVE,
+            auto_pause_warned_at=timezone.now(),
+        )
+
+        response = self.client.patch(self._detail_url(str(config.id)), data={"enabled": True}, format="json")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["auto_paused_at"] is None
+        config.refresh_from_db()
+        assert config.enabled is True
+        assert config.auto_paused_at is None
+        assert config.auto_pause_reason is None
+        assert config.auto_pause_warned_at is None
+
+    def test_partial_update_can_exempt_a_scout_from_the_inactivity_pause(self) -> None:
+        config = SignalScoutConfig.objects.create(team=self.team, skill_name="signals-scout-foo")
+
+        response = self.client.patch(self._detail_url(str(config.id)), data={"auto_pause_exempt": True}, format="json")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["auto_pause_exempt"] is True
+        config.refresh_from_db()
+        assert config.auto_pause_exempt is True
+
     def test_partial_update_slack_destination_is_project_scoped_and_round_trips(self) -> None:
         config = SignalScoutConfig.objects.create(team=self.team, skill_name="signals-scout-foo")
         other_team = Team.objects.create(organization=self.organization, name="other")

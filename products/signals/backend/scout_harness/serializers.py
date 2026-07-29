@@ -1902,6 +1902,36 @@ class SignalScoutConfigSerializer(serializers.ModelSerializer):
         allow_null=True,
         help_text="When the coordinator last dispatched this scout. Null if it has never run.",
     )
+    auto_paused_at = serializers.DateTimeField(
+        read_only=True,
+        allow_null=True,
+        help_text=(
+            "When this scout was paused for inactivity, after a warning period in which it still "
+            "surfaced nothing anyone engaged with. Null unless it was auto-paused. Set `enabled` "
+            "back to true to resume it — that clears the pause."
+        ),
+    )
+    auto_pause_reason = serializers.ChoiceField(
+        read_only=True,
+        allow_null=True,
+        choices=SignalScoutConfig.AutoPauseReason.choices,
+        help_text="Why this scout was paused for inactivity. Null unless it was auto-paused.",
+    )
+    auto_pause_warned_at = serializers.DateTimeField(
+        read_only=True,
+        allow_null=True,
+        help_text=(
+            "When the inactivity sweep first found this scout producing nothing. It pauses a grace "
+            "period later unless it surfaces something in the meantime. Null when it isn't at risk."
+        ),
+    )
+    auto_pause_exempt = serializers.BooleanField(
+        read_only=True,
+        help_text=(
+            "Whether this scout is exempt from the inactivity pause. Set it on watchdog scouts whose "
+            "value is staying quiet, so silence is never read as waste."
+        ),
+    )
 
     @extend_schema_field(OpenApiTypes.STR)
     def get_description(self, obj: SignalScoutConfig) -> str:
@@ -1930,6 +1960,10 @@ class SignalScoutConfigSerializer(serializers.ModelSerializer):
             "run_cron_schedule",
             "output_destinations",
             "last_run_at",
+            "auto_paused_at",
+            "auto_pause_reason",
+            "auto_pause_warned_at",
+            "auto_pause_exempt",
             "created_at",
         ]
         read_only_fields = ["id", "created_at"]
@@ -1992,6 +2026,13 @@ class SignalScoutConfigUpdateSerializer(serializers.ModelSerializer):
         required=False,
         help_text="Destinations that receive each finding or report this scout emits. Pass an empty object to disable delivery.",
     )
+    auto_pause_exempt = serializers.BooleanField(
+        required=False,
+        help_text=(
+            "Exempt this scout from the inactivity pause. Set it on watchdog scouts whose value is "
+            "staying quiet, so silence is never read as waste."
+        ),
+    )
 
     def validate_run_cron_schedule(self, value: str | None) -> str | None:
         return _validate_run_cron_schedule(value) if value is not None else None
@@ -2007,11 +2048,25 @@ class SignalScoutConfigUpdateSerializer(serializers.ModelSerializer):
             field in validated_data and validated_data[field] != getattr(instance, field) for field in schedule_fields
         ):
             validated_data["schedule_changed_at"] = timezone.now()
+        # Switching a scout back on is the one-click undo for an inactivity pause: clear the pause
+        # state so the resumed scout starts from a fresh window instead of one sweep away from being
+        # paused again.
+        if validated_data.get("enabled") and not instance.enabled:
+            validated_data["auto_paused_at"] = None
+            validated_data["auto_pause_reason"] = None
+            validated_data["auto_pause_warned_at"] = None
         return super().update(instance, validated_data)
 
     class Meta:
         model = SignalScoutConfig
-        fields = ["enabled", "emit", "run_interval_minutes", "run_cron_schedule", "output_destinations"]
+        fields = [
+            "enabled",
+            "emit",
+            "run_interval_minutes",
+            "run_cron_schedule",
+            "output_destinations",
+            "auto_pause_exempt",
+        ]
 
 
 class SignalScoutConfigOptionsSerializer(serializers.Serializer):
@@ -2037,6 +2092,14 @@ class SignalScoutConfigOptionsSerializer(serializers.Serializer):
     output_destinations = SignalScoutOutputDestinationsSerializer(
         required=False,
         help_text="Destinations that receive each finding or report this scout emits. Empty by default.",
+    )
+    auto_pause_exempt = serializers.BooleanField(
+        required=False,
+        help_text=(
+            "Exempt this scout from the inactivity pause, which otherwise switches off a scout that "
+            "goes a fortnight without surfacing anything anyone engages with. Set it on watchdog "
+            "scouts whose value is staying quiet. Defaults to false."
+        ),
     )
     run_cron_schedule = serializers.CharField(
         required=False,

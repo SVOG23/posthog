@@ -177,6 +177,17 @@ it is exercised via the `run_signals_scout` management command (see `../manageme
     See the module docstring at `profile/builders.py` for the authoritative section
     list — when adding or renaming a section, bump `INVENTORY_SOURCE_VERSION` so
     the cache invalidates cleanly.
+- `inactivity.py`
+  The stop switch. `sweep_inactive_scouts()` warns, then auto-pauses (`enabled=False` plus
+  `auto_paused_at` / `auto_pause_reason` on the config) any scout that goes `INACTIVITY_WINDOW`
+  without either producing output on **any** of the three emit channels
+  (`emitted_finding_ids` / `emitted_report_ids` / `edited_report_ids` — the finding tally alone
+  would read every report-channel scout as silent) or having someone engage with a report it wrote
+  earlier (a log/dismissal artefact, or the report reaching a user-driven status). Driven by the
+  daily `pause_inactive_signal_scouts` Celery task rather than the coordinator tick, which stays
+  short-lived and bounded. A dry-run scout, one younger than the cold-start grace, one that has
+  barely run, and one flagged `auto_pause_exempt` (watchdogs whose value is staying quiet) are all
+  left alone; re-enabling a scout through the config API clears the pause.
 - `limits.py`
   Runtime ceilings as module constants: `DEFAULT_MAX_RUNTIME_S` (per-run budget),
   `ACTIVITY_SLACK_S`, and `WORKFLOW_HARD_CEILING_S` (`= DEFAULT_MAX_RUNTIME_S +

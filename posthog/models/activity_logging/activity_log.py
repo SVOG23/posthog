@@ -335,6 +335,9 @@ field_name_overrides: dict[AuditableScope, dict[str, str]] = {
     "SignalScoutConfig": {
         "run_interval_minutes": "run interval (minutes)",
         "emit": "emit findings",
+        "auto_paused_at": "paused for inactivity",
+        "auto_pause_reason": "pause reason",
+        "auto_pause_exempt": "never pause for inactivity",
     },
     "OrganizationDomain": {
         "jit_provisioning_enabled": "just-in-time provisioning",
@@ -397,6 +400,9 @@ signal_exclusions: dict[ActivityScope, list[str]] = {
     # never spams the audit log.
     "SignalScoutConfig": [
         "last_run_at",
+        # Stamped (and cleared) by the daily inactivity sweep. The pause it leads to is logged; the
+        # warning that precedes it is UI state, not a config change.
+        "auto_pause_warned_at",
     ],
 }
 
@@ -756,6 +762,7 @@ field_exclusions: dict[AuditableScope, list[str]] = {
         # Run bookkeeping, not user intent — keep it out of change detection even when it
         # rides along with a real change (belt-and-suspenders with signal_exclusions above).
         "last_run_at",
+        "auto_pause_warned_at",
         # Reverse relations auto-managed by FK creates, not user-initiated config changes.
         "runs",
     ],
