@@ -1,5 +1,7 @@
 from posthog.test.base import BaseTest
 
+from parameterized import parameterized
+
 from posthog.models import Tag
 
 from products.conversations.backend.models import Ticket, TicketAssignment
@@ -23,15 +25,21 @@ class TestTicketDenormalizedFields(BaseTest):
         tag, _ = Tag.objects.get_or_create(name=name, team_id=self.team.id)
         self.ticket.tagged_items.create(tag=tag)
 
-    def test_tagging_and_untagging_syncs_tag_names(self):
-        self._tag("billing")
-        self._tag("urgent")
+    @parameterized.expand(
+        [
+            ("short_names", ["urgent", "billing"]),
+            ("max_length_names", ["a" * 255, "b" * 255]),
+        ]
+    )
+    def test_tagging_and_untagging_syncs_tag_names(self, _name, names):
+        for name in names:
+            self._tag(name)
         self.ticket.refresh_from_db()
-        assert self.ticket.tag_names == ["billing", "urgent"]  # stored sorted
+        assert self.ticket.tag_names == sorted(names)
 
-        self.ticket.tagged_items.filter(tag__name="urgent").delete()
+        self.ticket.tagged_items.filter(tag__name=names[-1]).delete()
         self.ticket.refresh_from_db()
-        assert self.ticket.tag_names == ["billing"]
+        assert self.ticket.tag_names == sorted(names[:-1])
 
     def test_assigning_user_syncs_assignee_columns(self):
         TicketAssignment.objects.create(ticket=self.ticket, user=self.user)
@@ -52,6 +60,19 @@ class TestTicketDenormalizedFields(BaseTest):
         self.ticket.refresh_from_db()
         assert self.ticket.assignee_role_id is None
         assert self.ticket.assignee_role_name is None
+
+    def test_reassigning_from_user_to_role_leaves_no_stale_user(self):
+        TicketAssignment.objects.create(ticket=self.ticket, user=self.user)
+        role = Role.objects.create(name="Team Support", organization=self.organization)
+
+        TicketAssignment.objects.update_or_create(
+            ticket_id=self.ticket.id, defaults={"user_id": None, "role_id": role.id}
+        )
+
+        self.ticket.refresh_from_db()
+        assert self.ticket.assignee_user_id is None
+        assert self.ticket.assignee_role_id == role.id
+        assert self.ticket.assignee_role_name == "Team Support"
 
     def test_renaming_role_updates_denormalized_name_on_assigned_tickets(self):
         role = Role.objects.create(name="Team Support", organization=self.organization)
