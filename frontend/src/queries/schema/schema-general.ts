@@ -8113,6 +8113,14 @@ export const externalDataSources = [
     'DuckLake',
     'Starburst',
     'Easybill',
+    'Bexio',
+    'Umami',
+    'Manychat',
+    'Kickstarter',
+    'Typesense',
+    'FirstPromoter',
+    'Zero',
+    'Inth',
 ] as const
 
 export type ExternalDataSourceType = (typeof externalDataSources)[number]
