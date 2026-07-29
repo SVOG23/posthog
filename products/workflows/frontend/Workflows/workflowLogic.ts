@@ -620,6 +620,7 @@ export interface workflowLogicActions {
                                     name?: string | undefined
                                     percentage: number
                                 }[]
+                                sticky_assignment?: boolean | undefined
                             }
                             created_at?: number | undefined
                             description: string
@@ -1406,6 +1407,7 @@ export interface workflowLogicActions {
                                     name?: string | undefined
                                     percentage: number
                                 }[]
+                                sticky_assignment?: boolean | undefined
                             }
                             created_at?: number | undefined
                             description: string
@@ -1826,12 +1828,6 @@ export interface workflowLogicActions {
         actionId: string
         config: Partial<
             | {
-                  cohorts: {
-                      name?: string | undefined
-                      percentage: number
-                  }[]
-              }
-            | {
                   delay_duration: string
               }
             | {
@@ -1839,6 +1835,13 @@ export interface workflowLogicActions {
               }
             | {
                   type: 'schedule'
+              }
+            | {
+                  cohorts: {
+                      name?: string | undefined
+                      percentage: number
+                  }[]
+                  sticky_assignment?: boolean | undefined
               }
             | {
                   conditions: {
@@ -2156,12 +2159,6 @@ export interface workflowLogicActions {
         actionId: string
         config:
             | {
-                  cohorts: {
-                      name?: string | undefined
-                      percentage: number
-                  }[]
-              }
-            | {
                   delay_duration: string
               }
             | {
@@ -2169,6 +2166,13 @@ export interface workflowLogicActions {
               }
             | {
                   type: 'schedule'
+              }
+            | {
+                  cohorts: {
+                      name?: string | undefined
+                      percentage: number
+                  }[]
+                  sticky_assignment?: boolean | undefined
               }
             | {
                   conditions: {

@@ -50,12 +50,6 @@ export interface stepDelayLogicActions {
         actionId: string,
         config:
             | {
-                  cohorts: {
-                      name?: string | undefined
-                      percentage: number
-                  }[]
-              }
-            | {
                   delay_duration: string
               }
             | {
@@ -63,6 +57,13 @@ export interface stepDelayLogicActions {
               }
             | {
                   type: 'schedule'
+              }
+            | {
+                  cohorts: {
+                      name?: string | undefined
+                      percentage: number
+                  }[]
+                  sticky_assignment?: boolean | undefined
               }
             | {
                   conditions: {
@@ -309,12 +310,6 @@ export interface stepDelayLogicActions {
         actionId: string
         config:
             | {
-                  cohorts: {
-                      name?: string | undefined
-                      percentage: number
-                  }[]
-              }
-            | {
                   delay_duration: string
               }
             | {
@@ -322,6 +317,13 @@ export interface stepDelayLogicActions {
               }
             | {
                   type: 'schedule'
+              }
+            | {
+                  cohorts: {
+                      name?: string | undefined
+                      percentage: number
+                  }[]
+                  sticky_assignment?: boolean | undefined
               }
             | {
                   conditions: {
