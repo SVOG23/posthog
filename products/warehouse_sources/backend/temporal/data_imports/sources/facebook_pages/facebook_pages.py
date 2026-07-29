@@ -1,7 +1,5 @@
 import re
-import hmac
 import json
-import hashlib
 import dataclasses
 from collections.abc import Iterator, Sequence
 from datetime import UTC, date, datetime
@@ -13,6 +11,8 @@ import structlog
 from dateutil import parser as dateutil_parser
 from structlog.types import FilteringBoundLogger
 from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+
+from posthog.models.integration import ERROR_TOKEN_REFRESH_FAILED, FacebookPagesIntegration, Integration
 
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.typings import SourceResponse
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.http import make_tracked_session
@@ -36,6 +36,11 @@ MAX_RETRIES = 5
 MAX_RETRY_AFTER_SECONDS = 60
 EDGE_PAGE_SIZE = 100
 
+# `/me/accounts` is paginated, and an agency user can administer a lot of Pages. Cap the walk so
+# the account picker can never spin forever on a pathological account.
+MAX_ACCOUNT_PAGES = 20
+ACCOUNTS_PAGE_SIZE = 100
+
 # How many times an insights window may be re-requested after dropping metrics Meta rejected.
 MAX_METRIC_DROP_ATTEMPTS = 3
 
@@ -45,6 +50,10 @@ SECONDS_PER_DAY = 24 * 60 * 60
 # token with HTTP 400, not 401, so the HTTP status alone can't drive the classification.
 AUTH_ERROR_PREFIX = "Facebook Graph API authentication failed"
 PERMISSION_ERROR_PREFIX = "Facebook Graph API permission denied"
+
+TOKEN_REFRESH_ERROR_MESSAGE = (
+    "Facebook rejected the stored credentials for this integration. Please reconnect your Facebook Pages integration."
+)
 
 # https://developers.facebook.com/docs/graph-api/guides/error-handling
 AUTH_ERROR_CODES = frozenset({102, 190, 458, 459, 460, 463, 464, 467})
@@ -71,6 +80,10 @@ class FacebookPagesAPIError(Exception):
     pass
 
 
+class FacebookPagesTokenRefreshError(Exception):
+    """Meta refused to re-mint the integration's user token — only re-authorization fixes it."""
+
+
 @dataclasses.dataclass
 class FacebookPagesResumeConfig:
     # Edges: the `paging.cursors.after` cursor and the `since` filter pinned at sync start.
@@ -80,15 +93,6 @@ class FacebookPagesResumeConfig:
     # unix seconds). The range end is pinned at sync start so resumes stay deterministic.
     window_since: int | None = None
     range_until: int | None = None
-
-
-def appsecret_proof(app_secret: str, access_token: str) -> str:
-    """Meta's proof-of-app-secret: HMAC-SHA256 of the access token keyed with the app secret.
-
-    Apps with "Require app secret" enabled reject any call without it, and sending it is
-    harmless otherwise, so every request carries one.
-    """
-    return hmac.new(app_secret.encode("utf-8"), access_token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def graph_url(api_version: str, path: str) -> str:
@@ -153,14 +157,12 @@ def _fetch_json_once(
     url: str,
     params: dict[str, str],
     access_token: str,
-    app_secret: str,
     logger: FilteringBoundLogger,
 ) -> dict[str, Any]:
-    query = {**params, "appsecret_proof": appsecret_proof(app_secret, access_token)}
     # The token rides in the Authorization header, never the query string, so it stays out of
     # request logs and captured samples.
     response = session.get(
-        f"{url}?{urlencode(query)}",
+        f"{url}?{urlencode(params)}",
         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -177,55 +179,65 @@ _fetch_json = retry(
 )(_fetch_json_once)
 
 
+def get_user_access_token(integration: Integration) -> str:
+    """Return the Meta user access token stored on the integration, re-minting it when it is due.
+
+    Meta issues no refresh token, so the long-lived user token is re-minted with `fb_exchange_token`
+    instead. `refresh_access_token` is a no-op while more than 7 days of the token's life remain,
+    so calling it on every sync is cheap.
+    """
+    facebook = FacebookPagesIntegration(integration)
+    facebook.refresh_access_token()
+
+    access_token = facebook.integration.access_token
+    if facebook.integration.errors == ERROR_TOKEN_REFRESH_FAILED or not access_token:
+        raise FacebookPagesTokenRefreshError(TOKEN_REFRESH_ERROR_MESSAGE)
+
+    return access_token
+
+
+def list_pages(
+    session: requests.Session, api_version: str, access_token: str, logger: FilteringBoundLogger
+) -> list[dict[str, Any]]:
+    """The Pages the connected Meta user administers, as `/me/accounts` returns them."""
+    pages: list[dict[str, Any]] = []
+    url = graph_url(api_version, "me/accounts")
+    params = {"fields": "id,name,category", "limit": str(ACCOUNTS_PAGE_SIZE)}
+
+    for _ in range(MAX_ACCOUNT_PAGES):
+        data = _fetch_json(session, url, params, access_token, logger)
+        pages.extend(page for page in (data.get("data") or []) if isinstance(page, dict) and page.get("id"))
+
+        after = ((data.get("paging") or {}).get("cursors") or {}).get("after")
+        if not (data.get("paging") or {}).get("next") or not after:
+            break
+        params = {**params, "after": after}
+
+    return pages
+
+
 def resolve_page_access_token(
     session: requests.Session,
     api_version: str,
-    app_id: str,
-    app_secret: str,
     page_id: str,
     access_token: str,
     logger: FilteringBoundLogger,
 ) -> str:
-    """Turn whatever token the customer pasted into a Page access token.
+    """Swap the connected user's token for the Page's own access token.
 
-    Both steps are best-effort upgrades: a customer who already pasted a long-lived Page token
-    can't exchange it and doesn't need to, so a failure here leaves the original token in place
-    and lets the real data request report the problem.
+    Page-level reads (insights in particular) want a Page token rather than the user token that
+    authorized the connection. It's a best-effort upgrade: if the Page node won't hand one over,
+    the user token stays in place and the real data request reports the problem.
     """
     token = access_token
 
     try:
-        exchanged = _fetch_json(
-            session,
-            graph_url(api_version, "oauth/access_token"),
-            {
-                "grant_type": "fb_exchange_token",
-                "client_id": app_id,
-                "client_secret": app_secret,
-                "fb_exchange_token": access_token,
-            },
-            access_token,
-            app_secret,
-            logger,
-        )
-        if exchanged.get("access_token"):
-            token = str(exchanged["access_token"])
-    except Exception as e:
-        # Log only the exception class: the exchange URL carries client_secret and the token as
-        # query params, and requests' exception text can echo the full URL back.
-        logger.debug(
-            "Facebook Pages: could not exchange for a long-lived token, using the supplied one",
-            error_type=type(e).__name__,
-        )
-
-    try:
-        page = _fetch_json(
-            session, graph_url(api_version, page_id), {"fields": "access_token"}, token, app_secret, logger
-        )
+        page = _fetch_json(session, graph_url(api_version, page_id), {"fields": "access_token"}, token, logger)
         if page.get("access_token"):
             token = str(page["access_token"])
     except Exception as e:
-        # See above: keep the credential-bearing URL out of the logged exception text.
+        # Log only the exception class: requests' exception text can echo the request URL back,
+        # and Graph error bodies quote the values they choked on.
         logger.debug(
             "Facebook Pages: could not read a Page access token, using the user token",
             error_type=type(e).__name__,
@@ -313,7 +325,6 @@ def _get_object_rows(
     api_version: str,
     page_id: str,
     access_token: str,
-    app_secret: str,
     config: FacebookPagesEndpointConfig,
     logger: FilteringBoundLogger,
 ) -> Iterator[list[dict[str, Any]]]:
@@ -322,7 +333,6 @@ def _get_object_rows(
         graph_url(api_version, page_id),
         {"fields": ",".join(config.fields)},
         access_token,
-        app_secret,
         logger,
     )
     if data:
@@ -334,7 +344,6 @@ def _get_edge_rows(
     api_version: str,
     page_id: str,
     access_token: str,
-    app_secret: str,
     config: FacebookPagesEndpointConfig,
     logger: FilteringBoundLogger,
     resumable_source_manager: ResumableSourceManager[FacebookPagesResumeConfig],
@@ -366,7 +375,7 @@ def _get_edge_rows(
         if after:
             params["after"] = after
 
-        data = _fetch_json(session, url, params, access_token, app_secret, logger)
+        data = _fetch_json(session, url, params, access_token, logger)
         items = [item for item in (data.get("data") or []) if isinstance(item, dict)]
 
         if since is not None and timestamp_field is not None:
@@ -397,7 +406,6 @@ def _fetch_insights_window(
     since: int,
     until: int,
     access_token: str,
-    app_secret: str,
     logger: FilteringBoundLogger,
 ) -> tuple[dict[str, Any], list[str]]:
     """Fetch one insights window, dropping metrics Meta rejects and retrying.
@@ -422,7 +430,6 @@ def _fetch_insights_window(
                     "until": str(until),
                 },
                 access_token,
-                app_secret,
                 logger,
             )
             return payload, remaining
@@ -441,7 +448,6 @@ def _get_insights_rows(
     api_version: str,
     page_id: str,
     access_token: str,
-    app_secret: str,
     config: FacebookPagesEndpointConfig,
     logger: FilteringBoundLogger,
     resumable_source_manager: ResumableSourceManager[FacebookPagesResumeConfig],
@@ -466,7 +472,7 @@ def _get_insights_rows(
     while window_since < range_until:
         window_until = min(window_since + INSIGHTS_WINDOW_DAYS * SECONDS_PER_DAY, range_until)
         payload, metrics = _fetch_insights_window(
-            session, url, metrics, window_since, window_until, access_token, app_secret, logger
+            session, url, metrics, window_since, window_until, access_token, logger
         )
 
         if not metrics:
@@ -489,8 +495,6 @@ def _get_insights_rows(
 def get_rows(
     page_id: str,
     access_token: str,
-    app_id: str,
-    app_secret: str,
     endpoint: str,
     api_version: str,
     logger: FilteringBoundLogger,
@@ -504,26 +508,26 @@ def get_rows(
     # capture=False: Graph responses carry arbitrary Page content (post text, stories,
     # descriptions) the name-based sample scrubber can't recognise, so keep them out of the
     # shared HTTP sample bucket. Requests stay metered and logged.
-    session = make_tracked_session(redact_values=(access_token, app_secret), capture=False)
-    token = resolve_page_access_token(session, api_version, app_id, app_secret, page_id, access_token, logger)
+    session = make_tracked_session(redact_values=(access_token,), capture=False)
+    token = resolve_page_access_token(session, api_version, page_id, access_token, logger)
+    # The Page token is minted mid-flight, so it needs its own session to be redacted from logs.
+    session = make_tracked_session(redact_values=(access_token, token), capture=False)
 
     if config.style == "object":
-        yield from _get_object_rows(session, api_version, page_id, token, app_secret, config, logger)
+        yield from _get_object_rows(session, api_version, page_id, token, config, logger)
     elif config.style == "edge":
         yield from _get_edge_rows(
-            session, api_version, page_id, token, app_secret, config, logger, resumable_source_manager, last_value
+            session, api_version, page_id, token, config, logger, resumable_source_manager, last_value
         )
     else:
         yield from _get_insights_rows(
-            session, api_version, page_id, token, app_secret, config, logger, resumable_source_manager, last_value
+            session, api_version, page_id, token, config, logger, resumable_source_manager, last_value
         )
 
 
 def validate_credentials(
     page_id: str,
     access_token: str,
-    app_id: str,
-    app_secret: str,
     api_version: str,
     schema_name: Optional[str] = None,
 ) -> tuple[bool, str | None]:
@@ -534,15 +538,15 @@ def validate_credentials(
     generic failure.
     """
     if not page_id.strip():
-        return False, "Enter the numeric ID of the Facebook Page you want to sync"
+        return False, "Select the Facebook Page you want to sync"
 
     logger = PROBE_LOGGER
     # capture=False for the same reason as the sync path: the probe reads Page fields whose
     # values the scrubber can't recognise. See get_rows.
-    session = make_tracked_session(redact_values=(access_token, app_secret), capture=False)
+    session = make_tracked_session(redact_values=(access_token,), capture=False)
 
     try:
-        token = resolve_page_access_token(session, api_version, app_id, app_secret, page_id, access_token, logger)
+        token = resolve_page_access_token(session, api_version, page_id, access_token, logger)
 
         config = FACEBOOK_PAGES_ENDPOINTS.get(schema_name) if schema_name else None
         if config is not None and config.style == "edge":
@@ -551,7 +555,6 @@ def validate_credentials(
                 graph_url(api_version, f"{page_id}/{config.edge}"),
                 {"fields": "id", "limit": "1"},
                 token,
-                app_secret,
                 logger,
             )
         elif config is not None and config.style == "insights":
@@ -560,13 +563,12 @@ def validate_credentials(
                 graph_url(api_version, f"{page_id}/{config.edge}"),
                 {"metric": PAGE_INSIGHTS_METRICS[0], "period": "day"},
                 token,
-                app_secret,
                 logger,
             )
         else:
-            _fetch_json(session, graph_url(api_version, page_id), {"fields": "id,name"}, token, app_secret, logger)
+            _fetch_json(session, graph_url(api_version, page_id), {"fields": "id,name"}, token, logger)
     except FacebookPagesAuthError:
-        return False, ("Facebook rejected the access token. Generate a new token for your app and reconnect.")
+        return False, "Facebook rejected the connected account. Please reconnect your Facebook Pages integration."
     except (FacebookPagesPermissionError, FacebookPagesAPIError, FacebookPagesRetryableError) as e:
         return False, str(e)
     except requests.exceptions.RequestException as e:
@@ -578,8 +580,6 @@ def validate_credentials(
 def facebook_pages_source(
     page_id: str,
     access_token: str,
-    app_id: str,
-    app_secret: str,
     endpoint: str,
     logger: FilteringBoundLogger,
     resumable_source_manager: ResumableSourceManager[FacebookPagesResumeConfig],
@@ -594,8 +594,6 @@ def facebook_pages_source(
         items=lambda: get_rows(
             page_id=page_id,
             access_token=access_token,
-            app_id=app_id,
-            app_secret=app_secret,
             endpoint=endpoint,
             api_version=api_version,
             logger=logger,

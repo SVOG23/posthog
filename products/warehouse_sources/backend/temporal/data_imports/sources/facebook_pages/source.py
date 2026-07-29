@@ -1,13 +1,17 @@
 from typing import Optional, cast
 
+import requests
+
 from posthog.schema import (
     DataWarehouseSourceCategory,
     ExternalDataSourceType as SchemaExternalDataSourceType,
     ReleaseStatus,
     SourceConfig,
-    SourceFieldInputConfig,
-    SourceFieldInputConfigType,
+    SourceFieldOauthAccountSelectConfig,
+    SourceFieldOauthConfig,
 )
+
+from posthog.models.integration import FACEBOOK_PAGES_SCOPE
 
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.typings import (
     SourceInputs,
@@ -17,14 +21,28 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.bas
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.canonical_descriptions import (
     CanonicalDescriptions,
 )
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.http import make_tracked_session
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.integration_accounts import (
+    IntegrationAccount,
+    IntegrationAccountListingError,
+)
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.mixins import OAuthMixin
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.registry import SourceRegistry
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import SourceSchema
 from products.warehouse_sources.backend.temporal.data_imports.sources.facebook_pages.facebook_pages import (
     AUTH_ERROR_PREFIX,
     PERMISSION_ERROR_PREFIX,
+    PROBE_LOGGER,
+    TOKEN_REFRESH_ERROR_MESSAGE,
+    FacebookPagesAuthError,
+    FacebookPagesPermissionError,
     FacebookPagesResumeConfig,
+    FacebookPagesRetryableError,
+    FacebookPagesTokenRefreshError,
     facebook_pages_source,
+    get_user_access_token,
+    list_pages,
     validate_credentials as validate_facebook_pages_credentials,
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.facebook_pages.settings import (
@@ -38,9 +56,11 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_
 )
 from products.warehouse_sources.backend.types import ExternalDataSourceType
 
+INTEGRATION_KIND = "facebook-pages"
+
 
 @SourceRegistry.register
-class FacebookPagesSource(ResumableSource[FacebookPagesSourceConfig, FacebookPagesResumeConfig]):
+class FacebookPagesSource(ResumableSource[FacebookPagesSourceConfig, FacebookPagesResumeConfig], OAuthMixin):
     supported_versions = (DEFAULT_API_VERSION,)
     default_version = DEFAULT_API_VERSION
     api_docs_url = "https://developers.facebook.com/docs/graph-api/"
@@ -66,50 +86,27 @@ class FacebookPagesSource(ResumableSource[FacebookPagesSourceConfig, FacebookPag
             keywords=["facebook", "meta", "graph api"],
             caption="""Pull your Facebook Page's profile, posts, videos, and daily insights into the PostHog Data warehouse.
 
-You need a Meta app with the **pages_read_engagement**, **pages_read_user_content**, and **read_insights** permissions, plus an access token for someone who administers the Page.
-
-1. In [Meta for Developers](https://developers.facebook.com/apps/), open your app and copy its **App ID** and **App secret** from **Settings → Basic**.
-2. Generate a user access token in the [Graph API Explorer](https://developers.facebook.com/tools/explorer/), granting the permissions above.
-3. Find your **Page ID** under **About → Page transparency** on the Page itself.
-
-PostHog exchanges the token for a long-lived Page access token on every sync, so a short-lived token from the explorer works.""",
+Connect the Meta account that manages the Page, then pick the Page you want to sync. PostHog asks for read-only access to your Pages, their posts, and their insights.""",
             iconPath="/static/services/facebook_pages.png",
             docsUrl="https://posthog.com/docs/cdp/sources/facebook-pages",
             releaseStatus=ReleaseStatus.ALPHA,
             fields=cast(
                 list[FieldType],
                 [
-                    SourceFieldInputConfig(
+                    SourceFieldOauthConfig(
+                        name="facebook_pages_integration_id",
+                        label="Facebook account",
+                        required=True,
+                        kind=INTEGRATION_KIND,
+                        requiredScopes=FACEBOOK_PAGES_SCOPE,
+                    ),
+                    SourceFieldOauthAccountSelectConfig(
                         name="page_id",
-                        label="Page ID",
-                        type=SourceFieldInputConfigType.TEXT,
+                        label="Facebook Page",
+                        integrationField="facebook_pages_integration_id",
+                        integrationKind=INTEGRATION_KIND,
                         required=True,
-                        placeholder="123456789012345",
-                        secret=False,
-                    ),
-                    SourceFieldInputConfig(
-                        name="app_id",
-                        label="App ID",
-                        type=SourceFieldInputConfigType.TEXT,
-                        required=True,
-                        placeholder="987654321098765",
-                        secret=False,
-                    ),
-                    SourceFieldInputConfig(
-                        name="app_secret",
-                        label="App secret",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="",
-                        secret=True,
-                    ),
-                    SourceFieldInputConfig(
-                        name="access_token",
-                        label="Access token",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="",
-                        secret=True,
+                        placeholder="Select a Page",
                     ),
                 ],
             ),
@@ -118,12 +115,17 @@ PostHog exchanges the token for a long-lived Page access token on every sync, so
     def get_non_retryable_errors(self) -> dict[str, str | None]:
         return {
             AUTH_ERROR_PREFIX: (
-                "Facebook rejected the access token. It may have expired or been revoked — generate a new "
-                "one for your Meta app and reconnect."
+                "Facebook rejected the connected account. Please reconnect your Facebook Pages integration."
             ),
             PERMISSION_ERROR_PREFIX: (
-                "Your Meta app is missing a permission needed to sync this table. Grant "
-                "pages_read_engagement, pages_read_user_content, and read_insights, then reconnect."
+                "The connected Meta account is missing a permission needed to sync this table. Reconnect your "
+                "Facebook Pages integration and grant access to your Pages, their posts, and their insights."
+            ),
+            TOKEN_REFRESH_ERROR_MESSAGE: TOKEN_REFRESH_ERROR_MESSAGE,
+            # The source still points at an Integration row the team no longer has, so
+            # `get_oauth_integration` raises. Retrying can't bring the row back.
+            "Integration not found": (
+                "The Facebook Pages integration for this source no longer exists. Please reconnect it."
             ),
         }
 
@@ -160,6 +162,49 @@ PostHog exchanges the token for a long-lived Page access token on every sync, so
 
         return schemas
 
+    def _access_token(self, integration_id: int, team_id: int) -> str:
+        return get_user_access_token(self.get_oauth_integration(integration_id, team_id))
+
+    def get_oauth_accounts(
+        self, integration_id: int, team_id: int, search: str | None = None
+    ) -> list[IntegrationAccount]:
+        # A Meta user administers few Pages, so `search` is ignored here and the endpoint filters the list.
+        try:
+            access_token = self._access_token(integration_id, team_id)
+        except ValueError as e:
+            raise IntegrationAccountListingError(
+                "The linked Facebook Pages integration could not be found. Please reconnect it."
+            ) from e
+        except FacebookPagesTokenRefreshError as e:
+            raise IntegrationAccountListingError(str(e)) from e
+
+        # capture=False for the same reason as the sync path: Page names are arbitrary customer
+        # content the sample scrubber can't recognise. See get_rows.
+        session = make_tracked_session(redact_values=(access_token,), capture=False)
+
+        try:
+            pages = list_pages(session, self.resolve_api_version(None), access_token, PROBE_LOGGER)
+        except (FacebookPagesAuthError, FacebookPagesPermissionError) as e:
+            raise IntegrationAccountListingError(
+                "Facebook rejected the credentials for this integration. Please reconnect it and make sure the "
+                "connected account can manage your Pages."
+            ) from e
+        except (FacebookPagesRetryableError, requests.RequestException) as e:
+            # Throttling or a Meta-side blip that outlived the in-process retries. Neither is a bug,
+            # so surface an actionable message rather than letting it escape as a 500.
+            raise IntegrationAccountListingError(
+                "Facebook is having trouble responding right now. Please try again in a few minutes."
+            ) from e
+
+        return [
+            IntegrationAccount(
+                value=str(page["id"]),
+                display_name=page.get("name") or "Unnamed Page",
+                badges=(page["category"],) if page.get("category") else (),
+            )
+            for page in pages
+        ]
+
     def validate_credentials(
         self,
         config: FacebookPagesSourceConfig,
@@ -167,11 +212,19 @@ PostHog exchanges the token for a long-lived Page access token on every sync, so
         schema_name: Optional[str] = None,
         api_version: str | None = None,
     ) -> tuple[bool, str | None]:
+        if not config.facebook_pages_integration_id:
+            return False, "Connect a Facebook account"
+        if not config.page_id:
+            return False, "Select the Facebook Page you want to sync"
+
+        try:
+            access_token = self._access_token(config.facebook_pages_integration_id, team_id)
+        except (ValueError, FacebookPagesTokenRefreshError) as e:
+            return False, str(e)
+
         return validate_facebook_pages_credentials(
             page_id=config.page_id,
-            access_token=config.access_token,
-            app_id=config.app_id,
-            app_secret=config.app_secret,
+            access_token=access_token,
             api_version=self.resolve_api_version(api_version),
             schema_name=schema_name,
         )
@@ -187,9 +240,7 @@ PostHog exchanges the token for a long-lived Page access token on every sync, so
     ) -> SourceResponse:
         return facebook_pages_source(
             page_id=config.page_id,
-            access_token=config.access_token,
-            app_id=config.app_id,
-            app_secret=config.app_secret,
+            access_token=self._access_token(config.facebook_pages_integration_id, inputs.team_id),
             endpoint=inputs.schema_name,
             logger=inputs.logger,
             resumable_source_manager=resumable_source_manager,

@@ -1,5 +1,3 @@
-import hmac
-import hashlib
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from typing import Any, Optional, cast
@@ -10,21 +8,26 @@ from unittest import mock
 
 import requests
 
+from posthog.models.integration import ERROR_TOKEN_REFRESH_FAILED
+
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.facebook_pages.facebook_pages import (
     AUTH_ERROR_PREFIX,
+    MAX_ACCOUNT_PAGES,
     PERMISSION_ERROR_PREFIX,
     FacebookPagesAPIError,
     FacebookPagesAuthError,
     FacebookPagesPermissionError,
     FacebookPagesResumeConfig,
     FacebookPagesRetryableError,
+    FacebookPagesTokenRefreshError,
     _to_epoch_seconds,
-    appsecret_proof,
     facebook_pages_source,
     flatten_insights,
     get_rows,
+    get_user_access_token,
     graph_url,
+    list_pages,
     raise_for_graph_error,
     resolve_page_access_token,
     unsupported_metrics,
@@ -40,8 +43,6 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.facebook_p
 MODULE = "products.warehouse_sources.backend.temporal.data_imports.sources.facebook_pages.facebook_pages"
 
 PAGE_ID = "123456789012345"
-APP_ID = "987654321098765"
-APP_SECRET = "app-secret"
 USER_TOKEN = "user-token"
 PAGE_TOKEN = "page-token"
 API_VERSION = "v23.0"
@@ -117,8 +118,6 @@ def _run(
             get_rows(
                 page_id=PAGE_ID,
                 access_token=USER_TOKEN,
-                app_id=APP_ID,
-                app_secret=APP_SECRET,
                 endpoint=endpoint,
                 api_version=API_VERSION,
                 logger=mock.MagicMock(),
@@ -129,13 +128,6 @@ def _run(
 
 
 class TestRequestSigning:
-    def test_appsecret_proof_is_hmac_sha256_of_the_token(self) -> None:
-        expected = hmac.new(APP_SECRET.encode(), PAGE_TOKEN.encode(), hashlib.sha256).hexdigest()
-        assert appsecret_proof(APP_SECRET, PAGE_TOKEN) == expected
-
-    def test_appsecret_proof_changes_with_the_token(self) -> None:
-        assert appsecret_proof(APP_SECRET, PAGE_TOKEN) != appsecret_proof(APP_SECRET, USER_TOKEN)
-
     def test_graph_url_pins_the_api_version(self) -> None:
         assert graph_url("v23.0", f"{PAGE_ID}/posts") == f"https://graph.facebook.com/v23.0/{PAGE_ID}/posts"
 
@@ -149,8 +141,6 @@ class TestRequestSigning:
                 get_rows(
                     page_id=PAGE_ID,
                     access_token=USER_TOKEN,
-                    app_id=APP_ID,
-                    app_secret=APP_SECRET,
                     endpoint="posts",
                     api_version=API_VERSION,
                     logger=mock.MagicMock(),
@@ -158,9 +148,8 @@ class TestRequestSigning:
                 )
             )
 
-        query = _query(session.urls[0])
         assert PAGE_TOKEN not in session.urls[0]
-        assert query["appsecret_proof"] == appsecret_proof(APP_SECRET, PAGE_TOKEN)
+        assert USER_TOKEN not in session.urls[0]
 
 
 class TestSampleCaptureDisabled:
@@ -177,8 +166,6 @@ class TestSampleCaptureDisabled:
                 get_rows(
                     page_id=PAGE_ID,
                     access_token=USER_TOKEN,
-                    app_id=APP_ID,
-                    app_secret=APP_SECRET,
                     endpoint="posts",
                     api_version=API_VERSION,
                     logger=mock.MagicMock(),
@@ -197,8 +184,6 @@ class TestSampleCaptureDisabled:
             validate_credentials(
                 page_id=PAGE_ID,
                 access_token=USER_TOKEN,
-                app_id=APP_ID,
-                app_secret=APP_SECRET,
                 api_version=API_VERSION,
             )
 
@@ -276,47 +261,89 @@ class TestErrorClassification:
 class TestTokenResolution:
     def _resolve(self, session: _FakeSession) -> str:
         return resolve_page_access_token(
-            cast(requests.Session, session), API_VERSION, APP_ID, APP_SECRET, PAGE_ID, USER_TOKEN, mock.MagicMock()
+            cast(requests.Session, session), API_VERSION, PAGE_ID, USER_TOKEN, mock.MagicMock()
         )
 
-    def test_exchanges_for_a_long_lived_token_then_swaps_to_the_page_token(self) -> None:
-        session = _FakeSession(
-            [
-                _response(json_data={"access_token": "long-lived"}),
-                _response(json_data={"id": PAGE_ID, "access_token": PAGE_TOKEN}),
-            ]
-        )
+    def test_swaps_the_user_token_for_the_page_token(self) -> None:
+        session = _FakeSession([_response(json_data={"id": PAGE_ID, "access_token": PAGE_TOKEN})])
 
         assert self._resolve(session) == PAGE_TOKEN
-        assert _query(session.urls[0])["grant_type"] == "fb_exchange_token"
-        assert _query(session.urls[0])["fb_exchange_token"] == USER_TOKEN
-        assert _query(session.urls[1])["fields"] == "access_token"
+        assert _query(session.urls[0])["fields"] == "access_token"
 
-    def test_falls_back_to_the_long_lived_token_when_the_page_lookup_returns_none(self) -> None:
-        session = _FakeSession(
-            [_response(json_data={"access_token": "long-lived"}), _response(json_data={"id": PAGE_ID})]
+    @pytest.mark.parametrize(
+        "response",
+        [
+            _response(json_data={"id": PAGE_ID}),
+            _response(status_code=400, json_data={"error": {"code": 100, "message": "nope"}}),
+        ],
+    )
+    def test_keeps_the_user_token_when_the_page_will_not_hand_one_over(self, response: mock.MagicMock) -> None:
+        # The user token can still read most edges, so let the real data request report the problem.
+        assert self._resolve(_FakeSession([response])) == USER_TOKEN
+
+
+class TestIntegrationToken:
+    def _integration(self, kind: str = "facebook-pages", access_token: str | None = USER_TOKEN) -> mock.MagicMock:
+        integration = mock.MagicMock()
+        integration.kind = kind
+        integration.errors = ""
+        integration.access_token = access_token
+        integration.config = {}
+        integration.sensitive_config = {"access_token": access_token}
+        return integration
+
+    @mock.patch(f"{MODULE}.FacebookPagesIntegration.refresh_access_token")
+    def test_refreshes_and_returns_the_stored_token(self, mock_refresh: mock.MagicMock) -> None:
+        assert get_user_access_token(self._integration()) == USER_TOKEN
+        mock_refresh.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "errors, access_token",
+        [(ERROR_TOKEN_REFRESH_FAILED, USER_TOKEN), ("", None)],
+    )
+    @mock.patch(f"{MODULE}.FacebookPagesIntegration.refresh_access_token")
+    def test_a_failed_refresh_asks_the_user_to_reconnect(
+        self, mock_refresh: mock.MagicMock, errors: str, access_token: str | None
+    ) -> None:
+        integration = self._integration(access_token=access_token)
+        integration.errors = errors
+
+        with pytest.raises(FacebookPagesTokenRefreshError):
+            get_user_access_token(integration)
+
+    def test_an_integration_of_another_kind_is_rejected(self) -> None:
+        with pytest.raises(Exception, match="wrong 'kind'"):
+            get_user_access_token(self._integration(kind="meta-ads"))
+
+
+class TestListPages:
+    def _accounts(self, ids: list[str], after: str | None) -> mock.MagicMock:
+        paging: dict[str, Any] = {}
+        if after:
+            paging = {"cursors": {"after": after}, "next": "https://graph.facebook.com/next"}
+        return _response(
+            json_data={"data": [{"id": page_id, "name": f"Page {page_id}"} for page_id in ids], "paging": paging}
         )
 
-        assert self._resolve(session) == "long-lived"
+    def _list(self, session: _FakeSession) -> list:
+        return list_pages(cast(requests.Session, session), API_VERSION, USER_TOKEN, mock.MagicMock())
 
-    def test_keeps_the_supplied_token_when_the_exchange_is_rejected(self) -> None:
-        # A customer who pasted a never-expiring Page token can't exchange it and doesn't need to.
-        session = _FakeSession(
-            [
-                _response(status_code=400, json_data={"error": {"code": 100, "message": "cannot exchange"}}),
-                _response(json_data={"id": PAGE_ID}),
-            ]
-        )
+    def test_follows_the_after_cursor_until_paging_next_is_absent(self) -> None:
+        session = _FakeSession([self._accounts(["1"], after="CUR1"), self._accounts(["2"], after=None)])
 
-        assert self._resolve(session) == USER_TOKEN
+        assert [page["id"] for page in self._list(session)] == ["1", "2"]
+        assert "after" not in _query(session.urls[0])
+        assert _query(session.urls[1])["after"] == "CUR1"
 
-    def test_keeps_the_supplied_token_when_both_upgrades_fail(self) -> None:
-        error = {"error": {"code": 100, "message": "nope"}}
-        session = _FakeSession(
-            [_response(status_code=400, json_data=error), _response(status_code=400, json_data=error)]
-        )
+    def test_stops_at_the_page_cap(self) -> None:
+        session = _FakeSession([self._accounts([str(i)], after=f"CUR{i}") for i in range(MAX_ACCOUNT_PAGES + 5)])
 
-        assert self._resolve(session) == USER_TOKEN
+        assert len(self._list(session)) == MAX_ACCOUNT_PAGES
+
+    def test_entries_without_an_id_are_dropped(self) -> None:
+        session = _FakeSession([_response(json_data={"data": [{"name": "no id"}, {"id": "1"}], "paging": {}})])
+
+        assert [page["id"] for page in self._list(session)] == ["1"]
 
 
 class TestObjectEndpoint:
@@ -649,8 +676,6 @@ class TestValidateCredentials:
             return validate_credentials(
                 page_id=page_id,
                 access_token=USER_TOKEN,
-                app_id=APP_ID,
-                app_secret=APP_SECRET,
                 api_version=API_VERSION,
                 schema_name=schema_name,
             )
@@ -707,8 +732,6 @@ class TestValidateCredentials:
             ok, error = validate_credentials(
                 page_id=PAGE_ID,
                 access_token=USER_TOKEN,
-                app_id=APP_ID,
-                app_secret=APP_SECRET,
                 api_version=API_VERSION,
             )
 
@@ -724,8 +747,6 @@ class TestSourceResponse:
         response = facebook_pages_source(
             page_id=PAGE_ID,
             access_token=USER_TOKEN,
-            app_id=APP_ID,
-            app_secret=APP_SECRET,
             endpoint=endpoint,
             logger=mock.MagicMock(),
             resumable_source_manager=_FakeManager(),
@@ -742,8 +763,6 @@ class TestSourceResponse:
         response = facebook_pages_source(
             page_id=PAGE_ID,
             access_token=USER_TOKEN,
-            app_id=APP_ID,
-            app_secret=APP_SECRET,
             endpoint=endpoint,
             logger=mock.MagicMock(),
             resumable_source_manager=_FakeManager(),
@@ -755,8 +774,6 @@ class TestSourceResponse:
         response = facebook_pages_source(
             page_id=PAGE_ID,
             access_token=USER_TOKEN,
-            app_id=APP_ID,
-            app_secret=APP_SECRET,
             endpoint="page",
             logger=mock.MagicMock(),
             resumable_source_manager=_FakeManager(),
