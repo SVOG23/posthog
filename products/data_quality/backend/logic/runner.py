@@ -88,7 +88,14 @@ def _execute(check: DataQualityCheck, team: Team) -> CheckOutcome:
         related_subject=resolve_subject(team.id, *related) if related else None,
     )
     with tags_context(product=Product.DATA_CATALOG, feature=Feature.ENRICHMENT):
-        response = execute_hogql_query(query=compiled.query, team=team, query_type=QUERY_TYPE)
+        # No user out here to authorize against, so warehouse access control has nobody to check;
+        # bypass it, or every check over a warehouse table or view errors once that flag is on.
+        response = execute_hogql_query(
+            query=compiled.query,
+            team=team,
+            query_type=QUERY_TYPE,
+            bypass_warehouse_access_control=True,
+        )
     return _interpret(compiled, check.config, response.results, response.columns or [])
 
 

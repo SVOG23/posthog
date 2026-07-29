@@ -244,6 +244,18 @@ class TestDataQualityCheckAPI(APIBaseTest):
         assert response.json()["checks_total"] == 1
         assert response.json()["checks_failing"] == 0
 
+    def test_read_only_actions_are_reachable_with_a_read_scoped_personal_api_key(self) -> None:
+        # check_types and health carry no query gate, so a data_quality:read token must reach them
+        # rather than hit the "does not support personal API key access" fallback.
+        api_key = self.create_personal_api_key_with_scopes(["data_quality:read"])
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {api_key}")
+
+        check_types = self.client.get(f"{self.url}/check_types/")
+        health = self.client.get(f"{self.url}/health/?subject_type={SubjectType.VIEW}&subject_uuid={self.view.id}")
+
+        assert check_types.status_code == status.HTTP_200_OK
+        assert health.status_code == status.HTTP_200_OK
+
     def test_run_returns_a_pollable_suite_run(self) -> None:
         check = self._create_check()
 

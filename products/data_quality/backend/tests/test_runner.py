@@ -120,6 +120,15 @@ class TestCheckRunner(BaseTest):
         assert run.status == CheckRunStatus.PASSED
         assert run.observed_value == 42.0
 
+    def test_the_check_query_bypasses_warehouse_access_control(self) -> None:
+        # The runner has no user to authorize, so it must bypass warehouse access control; without
+        # it every check over a warehouse table or view errors once that flag is enabled.
+        check = self._check()
+        with patch(RUNNER_QUERY, return_value=_Response(["failure_count", "observed_value"], [0, 0])) as query:
+            run_check(check, self.suite_run, self.team)
+
+        assert query.call_args.kwargs["bypass_warehouse_access_control"] is True
+
     @parameterized.expand(
         [
             ("first_failure", "", CheckSeverity.ERROR, True),

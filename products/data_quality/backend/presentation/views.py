@@ -182,7 +182,7 @@ class DataQualityCheckViewSet(_DataQualityGateMixin, TeamAndOrgViewSetMixin, vie
         parameters=[SubjectHealthQuerySerializer],
         responses={200: SubjectHealthSerializer},
     )
-    @action(methods=["GET"], detail=False, pagination_class=None)
+    @action(methods=["GET"], detail=False, pagination_class=None, required_scopes=["data_quality:read"])
     def health(self, request: Request, **kwargs) -> Response:
         query = SubjectHealthQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -207,7 +207,13 @@ class DataQualityCheckViewSet(_DataQualityGateMixin, TeamAndOrgViewSetMixin, vie
         description="The check types this project can author, with the JSON schema of each type's config.",
         responses={200: CheckTypeSerializer(many=True)},
     )
-    @action(methods=["GET"], detail=False, url_path="check_types", pagination_class=None)
+    @action(
+        methods=["GET"],
+        detail=False,
+        url_path="check_types",
+        pagination_class=None,
+        required_scopes=["data_quality:read"],
+    )
     def check_types(self, request: Request, **kwargs) -> Response:
         return Response(
             CheckTypeSerializer(
