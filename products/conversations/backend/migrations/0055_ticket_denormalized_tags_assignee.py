@@ -11,7 +11,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="ticket",
             name="tag_names",
-            field=ArrayField(models.CharField(max_length=200), blank=True, default=list, null=True, size=None),
+            field=ArrayField(models.CharField(max_length=255), blank=True, default=list, null=True, size=None),
         ),
         migrations.AddField(
             model_name="ticket",

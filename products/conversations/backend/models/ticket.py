@@ -72,7 +72,7 @@ class Ticket(UUIDTModel):
     # `support_tickets` table (and anything else querying the ticket in SQL) can't see them
     # without a join. Denormalizing here lets saved views defined by tag/assignee be expressed
     # in SQL — e.g. scheduled SLA reports. Nullable so raw non-Django inserts don't need them.
-    tag_names = ArrayField(models.CharField(max_length=200), default=list, blank=True, null=True)
+    tag_names = ArrayField(models.CharField(max_length=255), default=list, blank=True, null=True)
     assignee_user_id = models.BigIntegerField(null=True, blank=True)
     assignee_role_id = models.UUIDField(null=True, blank=True)
     assignee_role_name = models.CharField(max_length=200, null=True, blank=True)
