@@ -103,6 +103,27 @@ function backoffAt(baseMs: number, maxMs: number, tries: number): DateTime {
     return DateTime.utc().plus({ milliseconds: delay })
 }
 
+// Correlation ids stamped into every notification's data payload. An open happens on the device, so the
+// SDK is the only thing that can observe it; these ride along in the payload and come back on the
+// captured open event, which is what lets an open be attributed to the workflow and step that sent it.
+// Without them an open is only ever a global count.
+//
+// `posthog_` prefixed so the mobile SDKs recognize them as ours rather than app routing data, and so a
+// customer's own `data` keys can't be confused for them. Reserved: these win over same-named custom keys.
+const PUSH_CORRELATION_PREFIX = 'posthog_'
+
+function pushCorrelationData(invocation: CyclotronJobInvocationHogFunction): Record<string, string> {
+    const correlation: Record<string, string> = {
+        [`${PUSH_CORRELATION_PREFIX}workflow_id`]: invocation.functionId,
+        [`${PUSH_CORRELATION_PREFIX}invocation_id`]: invocation.id,
+    }
+    // Absent for a push sent outside a workflow step, where there is no step to attribute an open to.
+    if (invocation.state.actionId) {
+        correlation[`${PUSH_CORRELATION_PREFIX}action_id`] = invocation.state.actionId
+    }
+    return correlation
+}
+
 function pushSendError(platform: PushPlatform, err: NormalizedPushError, retryAfterMs?: number): PushSendError {
     // Append the raw provider code so the failure surfaced to the hog template stays debuggable, while
     // the human-readable sentence leads.
@@ -141,7 +162,17 @@ export class PushNotificationService {
             throw new Error('Bad invocation')
         }
 
-        const params = invocation.queueParameters as CyclotronInvocationQueueParametersSendPushNotificationType
+        const queueParams = invocation.queueParameters as CyclotronInvocationQueueParametersSendPushNotificationType
+        // Stamp the correlation ids last so they win over any custom `data` key of the same name. The
+        // enriched copy is local: `invocation.queueParameters` stays untouched, so a reschedule re-derives
+        // these rather than persisting them onto the job.
+        const params: CyclotronInvocationQueueParametersSendPushNotificationType = {
+            ...queueParams,
+            payload: {
+                ...queueParams.payload,
+                data: { ...(queueParams.payload?.data ?? {}), ...pushCorrelationData(invocation) },
+            },
+        }
         const result = createInvocationResult<CyclotronJobInvocationHogFunction>(invocation, {}, { finished: true })
         const addLog = createAddLogFunction(result.logs)
 

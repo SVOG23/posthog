@@ -145,6 +145,56 @@ describe('PushNotificationService', () => {
             })
         })
 
+        it('stamps workflow, action and invocation ids into the data payload so opens can be attributed', async () => {
+            // An open is captured on the device, so these ids riding along in the payload are the only
+            // way the resulting event can be tied back to the workflow and step that sent it.
+            const invocation = createSendPushNotificationInvocation({
+                '$device_push_subscription_test-project': encryptedFields.encrypt('device-token-123'),
+            })
+            invocation.state.actionId = 'push-step'
+            mockTrackedFetch.mockResolvedValue({
+                fetchError: null,
+                fetchResponse: {
+                    status: 200,
+                    text: () => Promise.resolve('{}'),
+                    dump: () => Promise.resolve(),
+                },
+                fetchDuration: 10,
+            })
+
+            await service.executeSendPushNotification(invocation)
+
+            const body = JSON.parse(mockTrackedFetch.mock.calls[0][0].fetchParams.body)
+            expect(body.message.data).toMatchObject({
+                posthog_workflow_id: invocation.functionId,
+                posthog_action_id: 'push-step',
+                posthog_invocation_id: invocation.id,
+            })
+        })
+
+        it('does not let a custom data key shadow a correlation id', async () => {
+            // `data` is customer-controlled. If a custom key could win, opens would be attributed to
+            // whatever workflow the sender named, so the reserved keys have to be applied last.
+            const invocation = createSendPushNotificationInvocation({
+                '$device_push_subscription_test-project': encryptedFields.encrypt('device-token-123'),
+            })
+            ;(invocation.queueParameters as any).payload.data = { posthog_workflow_id: 'not-the-real-workflow' }
+            mockTrackedFetch.mockResolvedValue({
+                fetchError: null,
+                fetchResponse: {
+                    status: 200,
+                    text: () => Promise.resolve('{}'),
+                    dump: () => Promise.resolve(),
+                },
+                fetchDuration: 10,
+            })
+
+            await service.executeSendPushNotification(invocation)
+
+            const body = JSON.parse(mockTrackedFetch.mock.calls[0][0].fetchParams.body)
+            expect(body.message.data.posthog_workflow_id).toBe(invocation.functionId)
+        })
+
         it('returns result with metric push_sent on success', async () => {
             const invocation = createSendPushNotificationInvocation({
                 '$device_push_subscription_test-project': encryptedFields.encrypt('device-token-123'),
