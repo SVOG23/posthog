@@ -17,6 +17,7 @@ import { EncryptedFields } from '../../utils/encryption-utils'
 import { createInvocationResult } from '../../utils/invocation-utils'
 import { getDevicePushSubscriptionToken } from '../../utils/push-subscription-utils'
 import { IntegrationManagerService } from '../managers/integration-manager.service'
+import { MessageAssetsService } from './message-assets.service'
 import {
     NormalizedPushError,
     PushPlatform,
@@ -128,7 +129,8 @@ export class PushNotificationService {
         private integrationManager: IntegrationManagerService,
         private encryptedFields: EncryptedFields,
         private fetchUtils: PushNotificationFetchUtils,
-        private redis: RedisV2 | null
+        private redis: RedisV2 | null,
+        private messageAssetsService?: MessageAssetsService
     ) {}
 
     @instrumented('push-notification.executeSendPushNotification')
@@ -184,6 +186,9 @@ export class PushNotificationService {
         let otherErrorCount = 0
         const errors: PushSendError[] = []
         let firstError: string | undefined
+        // Which providers actually took delivery, recorded on the captured asset so the person view can
+        // show where a notification went. Deduped because a step can select several channels of one kind.
+        const deliveredPlatforms = new Set<string>()
         for (const integrationId of integrationIds) {
             try {
                 const integration = await this.integrationManager.get(integrationId)
@@ -202,6 +207,7 @@ export class PushNotificationService {
 
                 if (sent) {
                     successCount++
+                    deliveredPlatforms.add(integration.kind === 'firebase' ? 'Firebase' : 'APNs')
                 } else {
                     // A channel with no registered device token for this recipient is skipped, not failed.
                     skippedCount++
@@ -265,6 +271,16 @@ export class PushNotificationService {
         pushMetric('push_sent', successCount)
         pushMetric('push_skipped', skippedCount)
         pushMetric('push_failed', errorCount)
+
+        // Captured at the terminal outcome for the same reason the business metrics are: a rescheduled
+        // attempt returns earlier, so a retried notification produces one asset rather than one per try.
+        // Outright failures capture nothing — there is no delivered notification to show a customer.
+        if (this.messageAssetsService && (successCount > 0 || skippedCount > 0)) {
+            const assetRow = this.messageAssetsService.buildRowForPush(invocation, params, [...deliveredPlatforms])
+            if (assetRow) {
+                result.emailAssets.push(assetRow)
+            }
+        }
         for (const error of errors) {
             pushNotificationFailedCounter.labels({ platform: error.platform, reason: error.reason }).inc()
         }

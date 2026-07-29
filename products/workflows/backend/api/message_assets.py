@@ -74,7 +74,10 @@ class MessageAssetSerializer(serializers.Serializer):
     parent_run_id = serializers.CharField(
         help_text="The batch run this email belongs to, for batch-triggered workflows. Empty for event-triggered runs."
     )
-    kind = serializers.CharField(help_text="Asset kind. Currently always 'email'.")
+    kind = serializers.CharField(
+        help_text="Message channel this asset was sent on: 'email' or 'push'. The per-person endpoint "
+        "currently returns only 'email'."
+    )
     distinct_id = serializers.CharField(help_text="The recipient's distinct_id.")
     person_id = serializers.CharField(help_text="The recipient's person UUID, if resolved.")
     recipient = serializers.CharField(help_text="The recipient email address.")
@@ -267,6 +270,10 @@ def fetch_message_assets_for_person(
         # Standalone hog_function email destinations aren't surfaced anywhere yet,
         # so this endpoint only returns workflow-step rows.
         "function_kind = 'hog_flow'",
+        # Push assets are captured but not yet surfaced: this backs the person Emails tab, and a push
+        # rendered as an email row would misrepresent it. Drop this filter when that tab becomes a
+        # combined Messages view.
+        "kind = 'email'",
     ]
     kwargs: dict[str, Any] = {
         "team_id": team_id,
