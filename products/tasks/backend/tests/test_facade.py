@@ -31,7 +31,6 @@ FACADE_MODULES = [
     "products.tasks.backend.facade.temporal",
     "products.tasks.backend.facade.max_tools",
     "products.tasks.backend.facade.webhooks",
-    "products.tasks.backend.facade.file_system",
 ]
 
 
