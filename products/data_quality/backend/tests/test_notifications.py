@@ -5,6 +5,9 @@ from unittest.mock import patch
 
 from parameterized import parameterized
 
+from posthog.constants import AvailableFeature
+from posthog.models import User
+
 from products.data_modeling.backend.facade.models import DataWarehouseSavedQuery
 from products.data_quality.backend.facade.enums import (
     CheckRunStatus,
@@ -13,8 +16,10 @@ from products.data_quality.backend.facade.enums import (
     SubjectType,
     SuiteRunTrigger,
 )
+from products.data_quality.backend.logic.notifications import _QueryAccessResolver
 from products.data_quality.backend.logic.runner import run_check
 from products.data_quality.backend.models import DataQualityCheck, DataQualitySuiteRun
+from products.notifications.backend.facade.enums import TargetType
 
 RUNNER_QUERY = "products.data_quality.backend.logic.runner.execute_hogql_query"
 CREATE_NOTIFICATION = "products.data_quality.backend.logic.notifications.create_notification"
@@ -88,6 +93,33 @@ class TestDataQualityNotifications(BaseTest):
                 run_check(check, self.suite_run, self.team)
 
         assert create_notification.call_args.args[0].resource_type == "warehouse_objects"
+
+    @patch("products.notifications.backend.resolvers.UserAccessControl")
+    def test_members_without_query_access_do_not_get_the_failing_row_count(self, mock_uac_cls) -> None:
+        # The body's failing-row count is a count oracle over warehouse rows the run-history API gates
+        # behind query access, so a member with warehouse access but no query access must be dropped.
+        self.organization.available_product_features = [{"key": AvailableFeature.ACCESS_CONTROL}]
+        self.organization.save()
+        denied = User.objects.create_and_join(self.organization, "no-query@test.com", "password")
+
+        class FakeUAC:
+            def __init__(self, user, team) -> None:
+                self._user_id = user.id
+
+            @property
+            def access_controls_supported(self) -> bool:
+                return True
+
+            def check_access_level_for_resource(self, resource, level) -> bool:
+                # Everyone can see warehouse objects; only the denied user lacks query access.
+                return resource != "query" or self._user_id != denied.id
+
+        mock_uac_cls.side_effect = FakeUAC
+
+        resolved = _QueryAccessResolver(self.team).resolve(TargetType.TEAM, str(self.team.id), self.team.id)
+
+        assert self.user.id in resolved
+        assert denied.id not in resolved
 
     def test_a_notification_failure_does_not_fail_the_run(self) -> None:
         check = self._check()

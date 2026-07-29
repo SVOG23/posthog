@@ -857,9 +857,10 @@ describe('Tool Filtering - Feature Flags', () => {
                 'warehouse-person-properties',
                 'review-hog',
                 'streamlit-apps',
+                'data-quality-checks',
             ])
         )
-        expect(flags).toHaveLength(26)
+        expect(flags).toHaveLength(27)
     })
 
     it('every loops tool is gated on the loops flag', () => {
