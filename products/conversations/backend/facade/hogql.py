@@ -6,9 +6,11 @@ A ticket's tags and assignee are normalized away from the ticket row, so a flat 
 `posthog_conversations_ticket` can't see them. These expose them at query time instead of
 storing a copy on the row.
 
-The raw federated tables (`_ticket_tagged_items`, `_ticket_assignments`, `_ticket_assignee_roles`)
-have no `team_id` column and should not be reachable directly from the SQL editor - they exist
-only so the lazy join subqueries below can be resolved by the planner.
+None of the three side tables has a `team_id` column, so each is scoped by a predicate instead of
+the framework's usual guard. That keeps a direct top-level SELECT safe, which matters because
+filtering through them is the cheap way to query tickets by tag or assignee: referencing a lazy
+join field in a WHERE clause stops ClickHouse pushing the ticket table's own filters down to
+Postgres, so it reads every ticket across every team and filters locally.
 """
 
 from posthog.hogql import ast
@@ -47,10 +49,30 @@ class _TicketScopedPostgresTable(PostgresTable, DANGEROUS_NoTeamIdCheckTable):
     predicates: list[Expr] = [parse_expr("ticket_id IN (SELECT id FROM system.support_tickets)")]
 
 
-ticket_tagged_items: _TicketScopedPostgresTable = _TicketScopedPostgresTable(
-    name="_ticket_tagged_items",
+class _TicketTaggedItemsTable(_TicketScopedPostgresTable):
+    """`posthog_taggeditem` links tags to every taggable object across every team, and tickets are
+    a small minority of its rows.
+
+    The `ticket_id IN (...)` scoping is a subquery, which ClickHouse cannot push down to Postgres,
+    so on its own the federated read streams the entire table over the wire and filters in
+    ClickHouse. `ticket_id IS NOT NULL` is a single-column predicate that does push down, and
+    Postgres serves it from the partial index on (tag_id, ticket_id) WHERE ticket_id IS NOT NULL,
+    so only ticket links are read. It is not redundant with the scoping above: one guards tenant
+    isolation, the other keeps the read off the rest of the table.
+    """
+
+    predicates: list[Expr] = [
+        parse_expr("ticket_id IN (SELECT id FROM system.support_tickets)"),
+        parse_expr("ticket_id IS NOT NULL"),
+    ]
+
+
+ticket_tagged_items: _TicketTaggedItemsTable = _TicketTaggedItemsTable(
+    name="support_ticket_tags",
+    access_scope="ticket",
+    access_control_id_field="ticket_id",
     postgres_table_name="posthog_taggeditem",
-    description="Internal federated junction table (PostgreSQL `posthog_taggeditem`) of tag-to-ticket links; not for direct querying - use `system.support_tickets.tags`.",
+    description="Tag-to-ticket links, one row per tag on a ticket. Join to `system.tags` for names. Filtering tickets through this table (`id IN (SELECT ticket_id FROM ...)`) reads far less than the `support_tickets.tags` lazy join, which is better suited to ad-hoc queries.",
     fields={
         "id": UUIDDatabaseField(name="id", description="Primary key of the tagged-item junction row."),
         "tag_id": UUIDDatabaseField(name="tag_id", description="Tag applied to the ticket; join to `system.tags.id`."),
@@ -63,9 +85,11 @@ ticket_tagged_items: _TicketScopedPostgresTable = _TicketScopedPostgresTable(
 )
 
 ticket_assignments: _TicketScopedPostgresTable = _TicketScopedPostgresTable(
-    name="_ticket_assignments",
+    name="support_ticket_assignments",
+    access_scope="ticket",
+    access_control_id_field="ticket_id",
     postgres_table_name="posthog_conversations_ticket_assignment",
-    description="Internal federated table (PostgreSQL `posthog_conversations_ticket_assignment`) of ticket assignments; not for direct querying - use `system.support_tickets.assignee`.",
+    description="Ticket assignments, one row per assigned ticket, to a user or a role but never both.",
     fields={
         "id": UUIDDatabaseField(name="id", description="Assignment UUID."),
         "ticket_id": UUIDDatabaseField(
@@ -89,13 +113,14 @@ class _TicketAssigneeRolesTable(PostgresTable, DANGEROUS_NoTeamIdCheckTable):
     the framework re-applies the team_id guard.
     """
 
-    predicates: list[Expr] = [parse_expr("id IN (SELECT role_id FROM system._ticket_assignments)")]
+    predicates: list[Expr] = [parse_expr("id IN (SELECT role_id FROM system.support_ticket_assignments)")]
 
 
 ticket_assignee_roles: _TicketAssigneeRolesTable = _TicketAssigneeRolesTable(
-    name="_ticket_assignee_roles",
+    name="support_ticket_roles",
+    access_scope="ticket",
     postgres_table_name="ee_role",
-    description="Internal federated table (PostgreSQL `ee_role`) naming the roles this team's tickets are assigned to; not for direct querying - use `system.support_tickets.assignee`.",
+    description="Roles this team's tickets are assigned to, one row per role. Join to `system.support_ticket_assignments.role_id`.",
     fields={
         "id": UUIDDatabaseField(name="id", description="Role UUID."),
         "name": StringDatabaseField(name="name", description="Role name, e.g. 'Team Support'."),
@@ -109,7 +134,7 @@ def _ticket_tags_select() -> ast.SelectQuery | ast.SelectSetQuery:
         SELECT
             tti.ticket_id AS ticket_id,
             arraySort(arrayDistinct(groupArray(t.name))) AS names
-        FROM system._ticket_tagged_items AS tti
+        FROM system.support_ticket_tags AS tti
         INNER JOIN system.tags AS t ON t.id = tti.tag_id
         GROUP BY tti.ticket_id
         """
@@ -124,8 +149,8 @@ def _ticket_assignee_select() -> ast.SelectQuery | ast.SelectSetQuery:
             ta.user_id AS user_id,
             ta.role_id AS role_id,
             nullIf(r.name, '') AS role_name
-        FROM system._ticket_assignments AS ta
-        LEFT JOIN system._ticket_assignee_roles AS r ON r.id = assumeNotNull(ta.role_id)
+        FROM system.support_ticket_assignments AS ta
+        LEFT JOIN system.support_ticket_roles AS r ON r.id = assumeNotNull(ta.role_id)
         """
     )
 

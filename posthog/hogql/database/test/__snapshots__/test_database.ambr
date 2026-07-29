@@ -8848,6 +8848,120 @@
           "row_count": null,
           "type": "system"
       },
+      "system.support_ticket_tags": {
+          "fields": {
+              "id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "id",
+                  "id": null,
+                  "name": "id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "tag_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "tag_id",
+                  "id": null,
+                  "name": "tag_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "ticket_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "ticket_id",
+                  "id": null,
+                  "name": "ticket_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              }
+          },
+          "id": "system.support_ticket_tags",
+          "name": "system.support_ticket_tags",
+          "row_count": null,
+          "type": "system"
+      },
+      "system.support_ticket_assignments": {
+          "fields": {
+              "id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "id",
+                  "id": null,
+                  "name": "id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "ticket_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "ticket_id",
+                  "id": null,
+                  "name": "ticket_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "user_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "user_id",
+                  "id": null,
+                  "name": "user_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "integer"
+              },
+              "role_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "role_id",
+                  "id": null,
+                  "name": "role_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              }
+          },
+          "id": "system.support_ticket_assignments",
+          "name": "system.support_ticket_assignments",
+          "row_count": null,
+          "type": "system"
+      },
+      "system.support_ticket_roles": {
+          "fields": {
+              "id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "id",
+                  "id": null,
+                  "name": "id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "name": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "name",
+                  "id": null,
+                  "name": "name",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              }
+          },
+          "id": "system.support_ticket_roles",
+          "name": "system.support_ticket_roles",
+          "row_count": null,
+          "type": "system"
+      },
       "system.surveys": {
           "fields": {
               "id": {
@@ -17711,6 +17825,120 @@
           },
           "id": "system.support_tickets",
           "name": "system.support_tickets",
+          "row_count": null,
+          "type": "system"
+      },
+      "system.support_ticket_tags": {
+          "fields": {
+              "id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "id",
+                  "id": null,
+                  "name": "id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "tag_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "tag_id",
+                  "id": null,
+                  "name": "tag_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "ticket_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "ticket_id",
+                  "id": null,
+                  "name": "ticket_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              }
+          },
+          "id": "system.support_ticket_tags",
+          "name": "system.support_ticket_tags",
+          "row_count": null,
+          "type": "system"
+      },
+      "system.support_ticket_assignments": {
+          "fields": {
+              "id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "id",
+                  "id": null,
+                  "name": "id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "ticket_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "ticket_id",
+                  "id": null,
+                  "name": "ticket_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "user_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "user_id",
+                  "id": null,
+                  "name": "user_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "integer"
+              },
+              "role_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "role_id",
+                  "id": null,
+                  "name": "role_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              }
+          },
+          "id": "system.support_ticket_assignments",
+          "name": "system.support_ticket_assignments",
+          "row_count": null,
+          "type": "system"
+      },
+      "system.support_ticket_roles": {
+          "fields": {
+              "id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "id",
+                  "id": null,
+                  "name": "id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "name": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "name",
+                  "id": null,
+                  "name": "name",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              }
+          },
+          "id": "system.support_ticket_roles",
+          "name": "system.support_ticket_roles",
           "row_count": null,
           "type": "system"
       },

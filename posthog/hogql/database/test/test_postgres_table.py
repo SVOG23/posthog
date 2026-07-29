@@ -52,6 +52,7 @@ _SCOPE_GATED_METADATA_TABLES: frozenset[str] = frozenset(
     {
         "custom_property_definitions",
         "account_relationship_definitions",
+        "support_ticket_roles",
     }
 )
 

@@ -108,9 +108,9 @@ TEAM_ID_FILTER_PATTERNS = {
     "_account_custom_property_values_history": "system__accounts.team_id",
     # Ticket side tables without team_id; isolation is enforced via a ticket_id IN
     # system.support_tickets predicate (roles resolve through that in turn)
-    "_ticket_tagged_items": "system__support_tickets.team_id",
-    "_ticket_assignments": "system__support_tickets.team_id",
-    "_ticket_assignee_roles": "system__support_tickets.team_id",
+    "support_ticket_tags": "system__support_tickets.team_id",
+    "support_ticket_assignments": "system__support_tickets.team_id",
+    "support_ticket_roles": "system__support_tickets.team_id",
 }
 
 
@@ -145,11 +145,6 @@ class TestSystemTablesTeamScoping(BaseTest):
             "_account_tagged_items",
             "_account_custom_property_values",
             "_account_custom_property_values_history",
-            # Hidden ticket side tables backing the system.support_tickets lazy joins;
-            # isolation is covered by TestSystemSupportTicketsLazyJoins.
-            "_ticket_tagged_items",
-            "_ticket_assignments",
-            "_ticket_assignee_roles",
             # information_schema is a namespace of virtual catalog tables (tables/columns/
             # relationships/data_types) computed per-query from the caller's own Database object,
             # so it has no team_id column to isolate; behaviour is covered by TestInformationSchema.
@@ -560,6 +555,22 @@ def _create_session_recording_playlist(team: Team, label: str):
     return SessionRecordingPlaylist.objects.create(team=team, name=f"playlist_{label}", type="collection")
 
 
+def _create_support_ticket_tag(team: Team, label: str):
+    ticket = _create_support_ticket(team, f"tagged_{label}")
+    tag, _ = Tag.objects.get_or_create(name=f"tag_{label}", team_id=team.id)
+    return ticket.tagged_items.create(tag=tag)
+
+
+def _create_support_ticket_assignment(team: Team, label: str):
+    ticket = _create_support_ticket(team, f"assigned_{label}")
+    role = Role.objects.create(name=f"role_{label}", organization=team.organization)
+    return TicketAssignment.objects.create(ticket=ticket, role=role)
+
+
+def _create_support_ticket_role(team: Team, label: str):
+    return _create_support_ticket_assignment(team, f"role_{label}").role
+
+
 def _create_support_ticket(team: Team, label: str) -> Ticket:
     return Ticket.objects.create_with_number(
         team=team,
@@ -729,6 +740,9 @@ SYSTEM_TABLE_FACTORIES = [
     ("session_recordings", _create_session_recording),
     ("source_schemas", _create_source_schema),
     ("support_tickets", _create_support_ticket),
+    ("support_ticket_tags", _create_support_ticket_tag),
+    ("support_ticket_assignments", _create_support_ticket_assignment),
+    ("support_ticket_roles", _create_support_ticket_role),
     ("surveys", _create_survey),
     ("tags", _create_tag),
     ("task_runs", _create_task_run),
@@ -1043,6 +1057,18 @@ class TestSystemSupportTicketsLazyJoins(NonAtomicBaseTest):
 
         assert {row[0] for row in response.results} == {match.ticket_number}
 
+    def test_tagged_items_read_is_filtered_to_tickets(self):
+        db = Database.create_for(team=self.team, user=self.user)
+        context = HogQLContext(team_id=self.team.pk, enable_select_queries=True, database=db)
+        query, _ = prepare_and_print_ast(
+            parse_select("SELECT id, tags.names FROM system.support_tickets"), context, dialect="clickhouse"
+        )
+
+        # ClickHouse pushes this single-column predicate down to Postgres; the ticket_id IN (...)
+        # scoping is a subquery it cannot push, so without this the federated read streams every
+        # tag link in the instance across the wire.
+        assert "isNotNull(tti.ticket_id)" in query
+
     def test_lazy_joins_isolated_per_team(self):
         other_role = Role.objects.create(name="Their Team", organization=self.other_org)
         theirs = self._ticket("theirs", self.other_team, tags=("billing",), role=other_role)
@@ -1059,14 +1085,14 @@ class TestSystemSupportTicketsLazyJoins(NonAtomicBaseTest):
         assert str(theirs.id) not in ids
 
         for table, column in (
-            ("_ticket_tagged_items", "ticket_id"),
-            ("_ticket_assignments", "ticket_id"),
+            ("support_ticket_tags", "ticket_id"),
+            ("support_ticket_assignments", "ticket_id"),
         ):
             rows = execute_hogql_query(f"SELECT {column} FROM system.{table}", team=self.team, user=self.user).results
             assert str(theirs.id) not in {str(row[0]) for row in rows}
 
         role_names = execute_hogql_query(
-            "SELECT name FROM system._ticket_assignee_roles", team=self.team, user=self.user
+            "SELECT name FROM system.support_ticket_roles", team=self.team, user=self.user
         ).results
         assert "Their Team" not in {row[0] for row in role_names}
 
