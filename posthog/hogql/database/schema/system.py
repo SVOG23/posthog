@@ -22,6 +22,13 @@ from posthog.hogql.parser import parse_expr
 
 from posthog.scopes import APIScopeObject
 
+from products.conversations.backend.facade.hogql import (
+    ticket_assignee_lazy_join,
+    ticket_assignee_roles,
+    ticket_assignments,
+    ticket_tagged_items,
+    ticket_tags_lazy_join,
+)
 from products.customer_analytics.backend.facade.hogql import (
     account_custom_property_values,
     account_custom_property_values_history,
@@ -1582,6 +1589,8 @@ support_tickets: PostgresTable = PostgresTable(
         ),
         "created_at": DateTimeDatabaseField(name="created_at", description="When the ticket was opened."),
         "updated_at": DateTimeDatabaseField(name="updated_at", description="When the ticket was last updated."),
+        "tags": ticket_tags_lazy_join,
+        "assignee": ticket_assignee_lazy_join,
     },
 )
 
@@ -2123,6 +2132,9 @@ class SystemTables(TableNode):
         "source_schemas": TableNode(name="source_schemas", table=source_schemas),
         "source_sync_jobs": TableNode(name="source_sync_jobs", table=source_sync_jobs),
         "support_tickets": TableNode(name="support_tickets", table=support_tickets),
+        "_ticket_tagged_items": TableNode(name="_ticket_tagged_items", table=ticket_tagged_items, hidden=True),
+        "_ticket_assignments": TableNode(name="_ticket_assignments", table=ticket_assignments, hidden=True),
+        "_ticket_assignee_roles": TableNode(name="_ticket_assignee_roles", table=ticket_assignee_roles, hidden=True),
         "surveys": TableNode(name="surveys", table=surveys),
         "task_runs": TableNode(name="task_runs", table=task_runs),
         "tags": TableNode(name="tags", table=tags),

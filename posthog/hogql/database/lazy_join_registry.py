@@ -31,6 +31,7 @@ from posthog.hogql.database.warehouse_join_resolvers import (
     resolve_foreign_key_join,
 )
 
+from products.conversations.backend.facade.hogql import ticket_assignee_join, ticket_tags_join
 from products.customer_analytics.backend.facade.hogql import (
     account_custom_properties_history_join,
     account_custom_properties_join,
@@ -81,6 +82,8 @@ RESOLVERS: dict[str, LazyJoinResolver] = {
     tags.ACCOUNT_CUSTOM_PROPERTIES: account_custom_properties_join,
     tags.ACCOUNT_CUSTOM_PROPERTIES_HISTORY: account_custom_properties_history_join,
     tags.ACCOUNT_RELATIONSHIPS: account_relationships_join,
+    tags.TICKET_TAGS: ticket_tags_join,
+    tags.TICKET_ASSIGNEE: ticket_assignee_join,
 }
 
 

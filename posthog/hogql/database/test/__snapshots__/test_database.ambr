@@ -8634,6 +8634,16 @@
                   "table": null,
                   "type": "integer"
               },
+              "identity_verified": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "identity_verified",
+                  "id": null,
+                  "name": "identity_verified",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "integer"
+              },
               "escalation_reason": {
                   "chain": null,
                   "fields": null,
@@ -8643,6 +8653,16 @@
                   "schema_valid": true,
                   "table": null,
                   "type": "string"
+              },
+              "ai_triage": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "ai_triage",
+                  "id": null,
+                  "name": "ai_triage",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "json"
               },
               "message_count": {
                   "chain": null,
@@ -8744,6 +8764,36 @@
                   "table": null,
                   "type": "datetime"
               },
+              "snoozed_until": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "snoozed_until",
+                  "id": null,
+                  "name": "snoozed_until",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "datetime"
+              },
+              "organization_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "organization_id",
+                  "id": null,
+                  "name": "organization_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "organization_id_source": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "organization_id_source",
+                  "id": null,
+                  "name": "organization_id_source",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
               "created_at": {
                   "chain": null,
                   "fields": null,
@@ -8763,6 +8813,34 @@
                   "schema_valid": true,
                   "table": null,
                   "type": "datetime"
+              },
+              "tags": {
+                  "chain": null,
+                  "fields": [
+                      "ticket_id",
+                      "names"
+                  ],
+                  "hogql_value": "tags",
+                  "id": "tags",
+                  "name": "tags",
+                  "schema_valid": true,
+                  "table": "ticket_tags",
+                  "type": "lazy_table"
+              },
+              "assignee": {
+                  "chain": null,
+                  "fields": [
+                      "ticket_id",
+                      "user_id",
+                      "role_id",
+                      "role_name"
+                  ],
+                  "hogql_value": "assignee",
+                  "id": "assignee",
+                  "name": "assignee",
+                  "schema_valid": true,
+                  "table": "ticket_assignee",
+                  "type": "lazy_table"
               }
           },
           "id": "system.support_tickets",
@@ -17422,6 +17500,16 @@
                   "table": null,
                   "type": "integer"
               },
+              "identity_verified": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "identity_verified",
+                  "id": null,
+                  "name": "identity_verified",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "integer"
+              },
               "escalation_reason": {
                   "chain": null,
                   "fields": null,
@@ -17431,6 +17519,16 @@
                   "schema_valid": true,
                   "table": null,
                   "type": "string"
+              },
+              "ai_triage": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "ai_triage",
+                  "id": null,
+                  "name": "ai_triage",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "json"
               },
               "message_count": {
                   "chain": null,
@@ -17532,6 +17630,36 @@
                   "table": null,
                   "type": "datetime"
               },
+              "snoozed_until": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "snoozed_until",
+                  "id": null,
+                  "name": "snoozed_until",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "datetime"
+              },
+              "organization_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "organization_id",
+                  "id": null,
+                  "name": "organization_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "organization_id_source": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "organization_id_source",
+                  "id": null,
+                  "name": "organization_id_source",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
               "created_at": {
                   "chain": null,
                   "fields": null,
@@ -17551,6 +17679,34 @@
                   "schema_valid": true,
                   "table": null,
                   "type": "datetime"
+              },
+              "tags": {
+                  "chain": null,
+                  "fields": [
+                      "ticket_id",
+                      "names"
+                  ],
+                  "hogql_value": "tags",
+                  "id": "tags",
+                  "name": "tags",
+                  "schema_valid": true,
+                  "table": "ticket_tags",
+                  "type": "lazy_table"
+              },
+              "assignee": {
+                  "chain": null,
+                  "fields": [
+                      "ticket_id",
+                      "user_id",
+                      "role_id",
+                      "role_name"
+                  ],
+                  "hogql_value": "assignee",
+                  "id": "assignee",
+                  "name": "assignee",
+                  "schema_valid": true,
+                  "table": "ticket_assignee",
+                  "type": "lazy_table"
               }
           },
           "id": "system.support_tickets",

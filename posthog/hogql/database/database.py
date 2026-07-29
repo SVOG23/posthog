@@ -336,6 +336,7 @@ _CATALOG_PICKLE_MODULE_PREFIXES = ("posthog.hogql.",)
 _CATALOG_PICKLE_MODULES = frozenset(
     {
         "posthog.clickhouse.workload",
+        "products.conversations.backend.facade.hogql",
         "products.customer_analytics.backend.facade.hogql",
     }
 )

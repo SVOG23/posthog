@@ -35,7 +35,7 @@ from products.business_knowledge.backend.models.constants import SourceStatus, S
 from products.cdp.backend.models.hog_functions.hog_function import HogFunction
 from products.cohorts.backend.models.calculation_history import CohortCalculationHistory
 from products.cohorts.backend.models.cohort import Cohort
-from products.conversations.backend.models import Ticket
+from products.conversations.backend.models import Ticket, TicketAssignment
 from products.dashboards.backend.models.dashboard import Dashboard
 from products.dashboards.backend.models.dashboard_tile import DashboardTile
 from products.data_modeling.backend.facade.models import DataModelingJob, DataWarehouseSavedQuery
@@ -56,6 +56,8 @@ from products.warehouse_sources.backend.facade.models import (
     ExternalDataSource,
 )
 from products.workflows.backend.models.hog_flow.hog_flow import HogFlow
+
+from ee.models.rbac.role import Role
 
 if TYPE_CHECKING:
     from products.customer_analytics.backend.models.account import Account
@@ -104,6 +106,11 @@ TEAM_ID_FILTER_PATTERNS = {
     "_account_tagged_items": "system__accounts.team_id",
     "_account_custom_property_values": "system__accounts.team_id",
     "_account_custom_property_values_history": "system__accounts.team_id",
+    # Ticket side tables without team_id; isolation is enforced via a ticket_id IN
+    # system.support_tickets predicate (roles resolve through that in turn)
+    "_ticket_tagged_items": "system__support_tickets.team_id",
+    "_ticket_assignments": "system__support_tickets.team_id",
+    "_ticket_assignee_roles": "system__support_tickets.team_id",
 }
 
 
@@ -138,6 +145,11 @@ class TestSystemTablesTeamScoping(BaseTest):
             "_account_tagged_items",
             "_account_custom_property_values",
             "_account_custom_property_values_history",
+            # Hidden ticket side tables backing the system.support_tickets lazy joins;
+            # isolation is covered by TestSystemSupportTicketsLazyJoins.
+            "_ticket_tagged_items",
+            "_ticket_assignments",
+            "_ticket_assignee_roles",
             # information_schema is a namespace of virtual catalog tables (tables/columns/
             # relationships/data_types) computed per-query from the caller's own Database object,
             # so it has no team_id column to isolate; behaviour is covered by TestInformationSchema.
@@ -945,6 +957,118 @@ class TestSystemSupportTicketsNewColumns(NonAtomicBaseTest):
         assert empty_row["snoozed_until"] is None
         assert empty_row["organization_id"] is None
         assert json.loads(empty_row["ai_triage"]) == {}
+
+
+class TestSystemSupportTicketsLazyJoins(NonAtomicBaseTest):
+    """Verify the `support_tickets.tags.names` and `support_tickets.assignee` lazy joins, which
+    read the ticket's tags and assignee from their side tables at query time."""
+
+    CLASS_DATA_LEVEL_SETUP = False
+
+    def setUp(self):
+        super().setUp()
+        other_org = Organization.objects.create(name="other_org")
+        other_project = Project.objects.create(id=Team.objects.increment_id_sequence(), organization=other_org)
+        self.other_team = Team.objects.create(id=other_project.id, project=other_project, organization=other_org)
+        self.other_org = other_org
+
+    def _ticket(self, label: str, team: Team, tags: tuple = (), role=None, user=None, status: str = "open") -> Ticket:
+        ticket = Ticket.objects.create_with_number(
+            team=team,
+            channel_source="widget",
+            widget_session_id=f"session_{label}",
+            distinct_id=f"user_{label}",
+            status=status,
+        )
+        for name in tags:
+            tag, _ = Tag.objects.get_or_create(name=name, team_id=team.id)
+            ticket.tagged_items.create(tag=tag)
+        if role is not None or user is not None:
+            TicketAssignment.objects.create(ticket=ticket, role=role, user=user)
+        return ticket
+
+    def test_tags_lazy_join_returns_sorted_names(self):
+        tagged = self._ticket("tagged", self.team, tags=("urgent", "billing"))
+        untagged = self._ticket("untagged", self.team)
+
+        response = execute_hogql_query(
+            "SELECT id, tags.names FROM system.support_tickets",
+            team=self.team,
+            user=self.user,
+        )
+        rows_by_id = {str(row[0]): row[1] for row in response.results}
+
+        assert rows_by_id[str(tagged.id)] == ["billing", "urgent"]
+        assert rows_by_id[str(untagged.id)] == []
+
+    def test_assignee_lazy_join_resolves_user_role_and_role_name(self):
+        role = Role.objects.create(name="Team Support", organization=self.organization)
+        by_role = self._ticket("by_role", self.team, role=role)
+        by_user = self._ticket("by_user", self.team, user=self.user)
+        unassigned = self._ticket("unassigned", self.team)
+
+        response = execute_hogql_query(
+            "SELECT id, assignee.user_id, assignee.role_id, assignee.role_name FROM system.support_tickets",
+            team=self.team,
+            user=self.user,
+        )
+        rows_by_id = {str(row[0]): row[1:] for row in response.results}
+
+        assert rows_by_id[str(by_role.id)] == (None, role.id, "Team Support")
+        assert rows_by_id[str(by_user.id)][0] == self.user.id
+        assert rows_by_id[str(by_user.id)][2] is None
+        assert rows_by_id[str(unassigned.id)] == (None, None, None)
+
+    def test_lazy_join_fields_filter_in_where(self):
+        role = Role.objects.create(name="Team Support", organization=self.organization)
+        other_role = Role.objects.create(name="Team Growth", organization=self.organization)
+        match = self._ticket("match", self.team, tags=("support_needs_triage",), role=role)
+        self._ticket("excluded_tag", self.team, tags=("support_needs_triage", "community"), role=role)
+        self._ticket("wrong_role", self.team, tags=("support_needs_triage",), role=other_role)
+        self._ticket("wrong_status", self.team, tags=("support_needs_triage",), role=role, status="closed")
+        self._ticket("no_matching_tag", self.team, tags=("billing",), role=role)
+
+        response = execute_hogql_query(
+            """
+            SELECT ticket_number
+            FROM system.support_tickets
+            WHERE status IN ('new', 'open', 'on_hold')
+              AND hasAny(tags.names, ['support_needs_triage', 'support_sme_analytics'])
+              AND NOT has(tags.names, 'community')
+              AND assignee.role_name = 'Team Support'
+            """,
+            team=self.team,
+            user=self.user,
+        )
+
+        assert {row[0] for row in response.results} == {match.ticket_number}
+
+    def test_lazy_joins_isolated_per_team(self):
+        other_role = Role.objects.create(name="Their Team", organization=self.other_org)
+        theirs = self._ticket("theirs", self.other_team, tags=("billing",), role=other_role)
+        ours = self._ticket("ours", self.team, tags=("billing",))
+
+        response = execute_hogql_query(
+            "SELECT id, tags.names, assignee.role_name FROM system.support_tickets",
+            team=self.team,
+            user=self.user,
+        )
+        ids = {str(row[0]) for row in response.results}
+
+        assert str(ours.id) in ids
+        assert str(theirs.id) not in ids
+
+        for table, column in (
+            ("_ticket_tagged_items", "ticket_id"),
+            ("_ticket_assignments", "ticket_id"),
+        ):
+            rows = execute_hogql_query(f"SELECT {column} FROM system.{table}", team=self.team, user=self.user).results
+            assert str(theirs.id) not in {str(row[0]) for row in rows}
+
+        role_names = execute_hogql_query(
+            "SELECT name FROM system._ticket_assignee_roles", team=self.team, user=self.user
+        ).results
+        assert "Their Team" not in {row[0] for row in role_names}
 
 
 class TestSystemAccountsLazyJoins(NonAtomicBaseTest):
