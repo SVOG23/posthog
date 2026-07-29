@@ -1,4 +1,5 @@
 from django.db import migrations
+from django.db.models import Q
 
 
 def backfill_denormalized_tags_assignee(apps, schema_editor):
@@ -6,6 +7,10 @@ def backfill_denormalized_tags_assignee(apps, schema_editor):
     Populate the denormalized tag_names / assignee_* columns for existing tickets from
     the TaggedItem and TicketAssignment side tables. Going forward, signals keep them
     in sync; this is the one-time catch-up for rows created before those columns existed.
+
+    Only tickets that actually carry a tag or an assignment are visited. Every other row
+    already holds the right empty value from the AddField default, so walking the whole
+    table would rewrite it for nothing — and this runs in a single transaction.
     """
     Ticket = apps.get_model("conversations", "Ticket")
     TaggedItem = apps.get_model("posthog", "TaggedItem")
@@ -13,12 +18,16 @@ def backfill_denormalized_tags_assignee(apps, schema_editor):
     Role = apps.get_model("ee", "Role")
 
     role_names = dict(Role.objects.values_list("id", "name"))
+    needs_backfill = (
+        Ticket.objects.filter(Q(tagged_items__isnull=False) | Q(assignment__isnull=False)).distinct().order_by("id")
+    )
 
     batch_size = 500
-    offset = 0
+    last_id = None
 
     while True:
-        tickets = list(Ticket.objects.order_by("id")[offset : offset + batch_size])
+        batch = needs_backfill if last_id is None else needs_backfill.filter(id__gt=last_id)
+        tickets = list(batch[:batch_size])
         if not tickets:
             break
 
@@ -39,10 +48,6 @@ def backfill_denormalized_tags_assignee(apps, schema_editor):
                 ticket.assignee_user_id = assignment.user_id
                 ticket.assignee_role_id = assignment.role_id
                 ticket.assignee_role_name = role_names.get(assignment.role_id) if assignment.role_id else None
-            else:
-                ticket.assignee_user_id = None
-                ticket.assignee_role_id = None
-                ticket.assignee_role_name = None
 
         Ticket.objects.bulk_update(
             tickets,
@@ -50,26 +55,16 @@ def backfill_denormalized_tags_assignee(apps, schema_editor):
             batch_size=batch_size,
         )
 
-        offset += batch_size
-
-
-def reverse_backfill(apps, schema_editor):
-    Ticket = apps.get_model("conversations", "Ticket")
-    Ticket.objects.all().update(
-        tag_names=[],
-        assignee_user_id=None,
-        assignee_role_id=None,
-        assignee_role_name=None,
-    )
+        last_id = ticket_ids[-1]
 
 
 class Migration(migrations.Migration):
     dependencies = [
         ("conversations", "0055_ticket_denormalized_tags_assignee"),
         ("posthog", "1032_remove_taggeditem_exactly_one_related_object_and_more"),  # TaggedItem.ticket FK
-        ("ee", "0054_backfill_llm_playground_access_control"),  # Role model
+        ("ee", "0014_roles_memberships_and_resource_access"),  # Role model
     ]
 
     operations = [
-        migrations.RunPython(backfill_denormalized_tags_assignee, reverse_backfill),
+        migrations.RunPython(backfill_denormalized_tags_assignee, migrations.RunPython.noop),
     ]
