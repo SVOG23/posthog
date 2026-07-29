@@ -156,7 +156,7 @@ export class MessageAssetsService {
     buildRowForPush(
         invocation: CyclotronJobInvocationHogFunction,
         params: CyclotronInvocationQueueParametersSendPushNotificationType,
-        platforms: string[],
+        platforms: string[]
     ): MessageAssetRow | null {
         if (!invocation.state.actionId) {
             return null

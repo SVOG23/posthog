@@ -133,10 +133,7 @@ describe('MessageAssetsService', () => {
 
     describe('buildRowForPush', () => {
         it('records the delivered platforms and renders the notification the recipient saw', () => {
-            const row = service.buildRowForPush(invocationWithAction('flow-1', 7), pushParams(), [
-                'Firebase',
-                'APNs',
-            ])
+            const row = service.buildRowForPush(invocationWithAction('flow-1', 7), pushParams(), ['Firebase', 'APNs'])
 
             expect(row).not.toBeNull()
             expect(row!.kind).toBe('push')
