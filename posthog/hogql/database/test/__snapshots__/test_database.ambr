@@ -8634,6 +8634,16 @@
                   "table": null,
                   "type": "integer"
               },
+              "identity_verified": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "identity_verified",
+                  "id": null,
+                  "name": "identity_verified",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "integer"
+              },
               "escalation_reason": {
                   "chain": null,
                   "fields": null,
@@ -8643,6 +8653,16 @@
                   "schema_valid": true,
                   "table": null,
                   "type": "string"
+              },
+              "ai_triage": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "ai_triage",
+                  "id": null,
+                  "name": "ai_triage",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "json"
               },
               "message_count": {
                   "chain": null,
@@ -8743,6 +8763,76 @@
                   "schema_valid": true,
                   "table": null,
                   "type": "datetime"
+              },
+              "snoozed_until": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "snoozed_until",
+                  "id": null,
+                  "name": "snoozed_until",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "datetime"
+              },
+              "organization_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "organization_id",
+                  "id": null,
+                  "name": "organization_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "organization_id_source": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "organization_id_source",
+                  "id": null,
+                  "name": "organization_id_source",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "tag_names": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "tag_names",
+                  "id": null,
+                  "name": "tag_names",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "array"
+              },
+              "assignee_user_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "assignee_user_id",
+                  "id": null,
+                  "name": "assignee_user_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "integer"
+              },
+              "assignee_role_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "assignee_role_id",
+                  "id": null,
+                  "name": "assignee_role_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "assignee_role_name": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "assignee_role_name",
+                  "id": null,
+                  "name": "assignee_role_name",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
               },
               "created_at": {
                   "chain": null,
@@ -17422,6 +17512,16 @@
                   "table": null,
                   "type": "integer"
               },
+              "identity_verified": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "identity_verified",
+                  "id": null,
+                  "name": "identity_verified",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "integer"
+              },
               "escalation_reason": {
                   "chain": null,
                   "fields": null,
@@ -17431,6 +17531,16 @@
                   "schema_valid": true,
                   "table": null,
                   "type": "string"
+              },
+              "ai_triage": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "ai_triage",
+                  "id": null,
+                  "name": "ai_triage",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "json"
               },
               "message_count": {
                   "chain": null,
@@ -17531,6 +17641,76 @@
                   "schema_valid": true,
                   "table": null,
                   "type": "datetime"
+              },
+              "snoozed_until": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "snoozed_until",
+                  "id": null,
+                  "name": "snoozed_until",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "datetime"
+              },
+              "organization_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "organization_id",
+                  "id": null,
+                  "name": "organization_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "organization_id_source": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "organization_id_source",
+                  "id": null,
+                  "name": "organization_id_source",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "tag_names": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "tag_names",
+                  "id": null,
+                  "name": "tag_names",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "array"
+              },
+              "assignee_user_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "assignee_user_id",
+                  "id": null,
+                  "name": "assignee_user_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "integer"
+              },
+              "assignee_role_id": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "assignee_role_id",
+                  "id": null,
+                  "name": "assignee_role_id",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
+              },
+              "assignee_role_name": {
+                  "chain": null,
+                  "fields": null,
+                  "hogql_value": "assignee_role_name",
+                  "id": null,
+                  "name": "assignee_role_name",
+                  "schema_valid": true,
+                  "table": null,
+                  "type": "string"
               },
               "created_at": {
                   "chain": null,
