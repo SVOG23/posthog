@@ -1191,6 +1191,11 @@ class SignalScoutConfig(ModelActivityMixin, TeamScopedRootMixin, UUIDModel):
     # Stamped on the first sweep that finds a scout inactive; the pause lands only if it is still
     # inactive a grace period later. Bookkeeping, so it's excluded from activity logging.
     auto_pause_warned_at = models.DateTimeField(null=True, blank=True)
+    # When a user last resumed the scout after an inactivity pause. Without it the sweep would judge
+    # a resumed scout on the same silent runs that got it paused, so it would be warned again on the
+    # next tick and paused a week later — a resume has to buy a full fresh window. Not exposed on the
+    # API: it's bookkeeping the sweep reads, not a knob.
+    auto_pause_reset_at = models.DateTimeField(null=True, blank=True)
     # Opt-out for deliberately low-signal scouts — a watchdog whose whole value is staying quiet
     # (health checks, inbox validation) is *supposed* to emit nothing most weeks, so the sweep must
     # never touch it. `db_default` alongside `default` keeps the AddField non-blocking and the

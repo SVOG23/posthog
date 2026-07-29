@@ -2048,12 +2048,17 @@ class SignalScoutConfigUpdateSerializer(serializers.ModelSerializer):
             field in validated_data and validated_data[field] != getattr(instance, field) for field in schedule_fields
         ):
             validated_data["schedule_changed_at"] = timezone.now()
-        # Switching a scout back on is the one-click undo for an inactivity pause: clear the pause
-        # state so the resumed scout starts from a fresh window instead of one sweep away from being
-        # paused again.
+        # Switching a scout back on is the one-click undo for an inactivity pause: clear the pause and
+        # stamp the reset, which is what buys the resumed scout a full fresh window rather than the
+        # week left on the old one.
         if validated_data.get("enabled") and not instance.enabled:
             validated_data["auto_paused_at"] = None
             validated_data["auto_pause_reason"] = None
+            validated_data["auto_pause_warned_at"] = None
+            validated_data["auto_pause_reset_at"] = timezone.now()
+        # Exempting a scout takes it out of the sweep entirely, so nothing would ever clear a pending
+        # warning — and the fleet page would keep saying it's about to pause.
+        if validated_data.get("auto_pause_exempt"):
             validated_data["auto_pause_warned_at"] = None
         return super().update(instance, validated_data)
 

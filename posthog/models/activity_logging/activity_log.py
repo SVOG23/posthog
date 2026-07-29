@@ -401,8 +401,10 @@ signal_exclusions: dict[ActivityScope, list[str]] = {
     "SignalScoutConfig": [
         "last_run_at",
         # Stamped (and cleared) by the daily inactivity sweep. The pause it leads to is logged; the
-        # warning that precedes it is UI state, not a config change.
+        # warning that precedes it is UI state, not a config change. `auto_pause_reset_at` rides along
+        # with a re-enable, which is logged on its own.
         "auto_pause_warned_at",
+        "auto_pause_reset_at",
     ],
 }
 
@@ -763,6 +765,7 @@ field_exclusions: dict[AuditableScope, list[str]] = {
         # rides along with a real change (belt-and-suspenders with signal_exclusions above).
         "last_run_at",
         "auto_pause_warned_at",
+        "auto_pause_reset_at",
         # Reverse relations auto-managed by FK creates, not user-initiated config changes.
         "runs",
     ],

@@ -158,7 +158,9 @@ class TestScoutInactivitySweep(BaseTest):
         self._runs(1, age=INACTIVITY_WINDOW + timedelta(days=5), emitted_report_ids=[str(report.id)])
         self._silent_runs()
         if artefact_type is not None:
-            SignalReportArtefact.objects.create(team=self.team, report=report, type=artefact_type, content="{}")
+            SignalReportArtefact.objects.create(
+                team=self.team, report=report, type=artefact_type, content="{}", created_by=self.user
+            )
         if status is not None:
             SignalReport.objects.filter(pk=report.pk).update(status=status, updated_at=self.now - timedelta(days=1))
 
@@ -167,15 +169,23 @@ class TestScoutInactivitySweep(BaseTest):
         assert outcome.warned == []
         assert self._reload().auto_pause_warned_at is None
 
-    def test_pipeline_judgments_on_an_untouched_report_are_not_engagement(self) -> None:
+    @parameterized.expand(
+        [
+            # A pipeline assessment, never a person's work.
+            ("status_judgment", SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT),
+            # The right type, but written by the pipeline: grouping appends a symmetric `related_to`
+            # when a resolved report recurs, and autostart appends `task_run`, both unattributed.
+            ("unattributed_log", SignalReportArtefact.ArtefactType.RELATED_TO),
+        ]
+    )
+    def test_pipeline_artefacts_are_not_engagement(self, _name: str, artefact_type: str) -> None:
         report = self._report()
         self._runs(1, age=INACTIVITY_WINDOW + timedelta(days=5), emitted_report_ids=[str(report.id)])
         self._silent_runs()
-        # Appended by the pipeline on its own, so it says nothing about anyone using the report.
         SignalReportArtefact.objects.create(
             team=self.team,
             report=report,
-            type=SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT,
+            type=artefact_type,
             content="{}",
         )
 
@@ -218,6 +228,26 @@ class TestScoutInactivitySweep(BaseTest):
         self._runs(MIN_RUNS_IN_WINDOW - 1, age=INACTIVITY_WINDOW / 2)
 
         assert sweep_inactive_scouts(now=self.now).warned == []
+
+    def test_a_resumed_scout_gets_a_full_fresh_window(self) -> None:
+        # Without the reset stamp the sweep would judge the resumed scout on the same silent runs
+        # that paused it, so a resume would buy a week rather than a fresh window.
+        self._silent_runs()
+        sweep_inactive_scouts(now=self.now)
+        sweep_inactive_scouts(now=self.now + WARNING_GRACE)
+        resumed_at = self.now + WARNING_GRACE + timedelta(hours=1)
+        SignalScoutConfig.all_teams.filter(pk=self.config.pk).update(
+            enabled=True,
+            auto_paused_at=None,
+            auto_pause_reason=None,
+            auto_pause_warned_at=None,
+            auto_pause_reset_at=resumed_at,
+        )
+
+        outcome = sweep_inactive_scouts(now=resumed_at + timedelta(days=1))
+
+        assert outcome.warned == []
+        assert self._reload().auto_pause_warned_at is None
 
     def test_pause_survives_lazy_seed_reconciliation(self) -> None:
         # Configs are re-reconciled on every coordinator tick; a pause that gets quietly re-enabled

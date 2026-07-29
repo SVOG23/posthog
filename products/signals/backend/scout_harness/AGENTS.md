@@ -182,14 +182,17 @@ it is exercised via the `run_signals_scout` management command (see `../manageme
   `auto_paused_at` / `auto_pause_reason` on the config) any scout that goes `INACTIVITY_WINDOW`
   without either producing output on **any** of the three emit channels
   (`emitted_finding_ids` / `emitted_report_ids` / `edited_report_ids` — the finding tally alone
-  would read every report-channel scout as silent) or having someone engage with a report it wrote
-  earlier (a log/dismissal artefact, or the report reaching a user-driven status). The pause records
+  would read every report-channel scout as silent) or having a **person** engage with a report it wrote
+  earlier (a log artefact attributed to a user, or the report reaching a user-driven status — pipeline
+  writers append log artefacts of their own, so unattributed ones don't count). The pause records
   which shape of waste it was — `no_output` for a scout that surfaces nothing, `ignored` for one whose
   reports nobody picks up — because the two want different fixes. Driven by the
   daily `pause_inactive_signal_scouts` Celery task rather than the coordinator tick, which stays
   short-lived and bounded. A dry-run scout, one younger than the cold-start grace, one that has
   barely run, and one flagged `auto_pause_exempt` (watchdogs whose value is staying quiet) are all
-  left alone; re-enabling a scout through the config API clears the pause.
+  left alone. Re-enabling a scout through the config API clears the pause and stamps
+  `auto_pause_reset_at`, which is what gives the resumed scout a full fresh window rather than the
+  week left on the pause it came out of.
 - `limits.py`
   Runtime ceilings as module constants: `DEFAULT_MAX_RUNTIME_S` (per-run budget),
   `ACTIVITY_SLACK_S`, and `WORKFLOW_HARD_CEILING_S` (`= DEFAULT_MAX_RUNTIME_S +

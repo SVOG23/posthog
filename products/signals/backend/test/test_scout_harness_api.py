@@ -1376,9 +1376,16 @@ class TestScoutHarnessConfigAPI(APIBaseTest):
         assert config.auto_paused_at is None
         assert config.auto_pause_reason is None
         assert config.auto_pause_warned_at is None
+        # The reset stamp is what buys the resumed scout a fresh window instead of the week left on
+        # the pause it just came out of.
+        assert config.auto_pause_reset_at is not None
 
     def test_partial_update_can_exempt_a_scout_from_the_inactivity_pause(self) -> None:
-        config = SignalScoutConfig.objects.create(team=self.team, skill_name="signals-scout-foo")
+        # Exempting takes the scout out of the sweep, so nothing else would ever clear a pending
+        # warning and the fleet page would keep saying it's about to pause.
+        config = SignalScoutConfig.objects.create(
+            team=self.team, skill_name="signals-scout-foo", auto_pause_warned_at=timezone.now()
+        )
 
         response = self.client.patch(self._detail_url(str(config.id)), data={"auto_pause_exempt": True}, format="json")
 
@@ -1386,6 +1393,7 @@ class TestScoutHarnessConfigAPI(APIBaseTest):
         assert response.json()["auto_pause_exempt"] is True
         config.refresh_from_db()
         assert config.auto_pause_exempt is True
+        assert config.auto_pause_warned_at is None
 
     def test_partial_update_slack_destination_is_project_scoped_and_round_trips(self) -> None:
         config = SignalScoutConfig.objects.create(team=self.team, skill_name="signals-scout-foo")

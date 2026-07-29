@@ -11,9 +11,9 @@ A scout counts as **productive** if either half holds over the window:
   (`emitted_finding_ids`, `emitted_report_ids`, `edited_report_ids`). All three matter: a
   report-channel scout writes through `emit_report` / `edit_report`, so judging on the finding
   tally alone would read every one of them as silent.
-- *engagement* — someone acted on a report the scout wrote or edited before the window: a log
-  artefact (note, dismissal, task run, commit, code review, reviewer change…) landed on it inside
-  the window, or the report reached a state only a human action produces. Reports the scout touched
+- *engagement* — a person acted on a report the scout wrote or edited before the window: they left a
+  log artefact on it (a note, a dismissal, a code reference…) inside the window, or the report
+  reached a state only a human action produces. Reports the scout touched
   *inside* the window are excluded from this half — they are already covered by the output half, and
   including them would count the scout's own writes as engagement with itself. Client-side opens
   aren't persisted server-side, so they can't count either way.
@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from django.db.models import Q
 from django.utils import timezone
 
 import structlog
@@ -62,9 +63,9 @@ MIN_RUNS_IN_WINDOW = 5
 # rescue the scout that wrote it.
 TOUCHED_REPORT_LOOKBACK = timedelta(days=90)
 
-# Artefact types that mean someone did work on a report. The status artefacts (safety / actionability
-# / priority judgments, repo selection) are excluded — the pipeline appends those on its own, so they
-# would read as engagement on a report nobody ever looked at.
+# Artefact types that mean work was done on a report. Only ones attributed to a person count (see
+# `_engaged_report_ids`). The status artefacts (safety / actionability / priority judgments, repo
+# selection) are excluded outright — they are pipeline assessments, never a person's work.
 _ENGAGEMENT_ARTEFACT_TYPES: frozenset[str] = SignalReportArtefact.LOG_ARTEFACT_TYPES | frozenset(
     {SignalReportArtefact.ArtefactType.DISMISSAL}
 )
@@ -107,6 +108,10 @@ def sweep_inactive_scouts(now: datetime | None = None) -> SweepOutcome:
     # per-team query below is then keyed on the `team_id` carried by the config rows themselves.
     candidates = (
         SignalScoutConfig.all_teams.filter(
+            # A resume has to buy a full fresh window, so the grace runs from the reset stamp when
+            # there is one. Because the grace is at least as long as the window, every run the
+            # assessment below can see is then from after the resume.
+            Q(auto_pause_reset_at__isnull=True) | Q(auto_pause_reset_at__lte=now - COLD_START_GRACE),
             enabled=True,
             # A dry-run scout emits nothing by design, so the productivity test can't say anything
             # about it — `emit_finding` is a no-op there and never records output on the run.
@@ -200,7 +205,7 @@ def _assess_team(team_id: int, skill_names: list[str], now: datetime) -> tuple[s
 
 
 def _engaged_report_ids(team_id: int, report_ids: set[str], window_start: datetime) -> set[str]:
-    """Of `report_ids`, the ones someone acted on since `window_start`."""
+    """Of `report_ids`, the ones a person acted on since `window_start`."""
     if not report_ids:
         return set()
     engaged = {
@@ -209,6 +214,11 @@ def _engaged_report_ids(team_id: int, report_ids: set[str], window_start: dateti
             team_id=team_id,
             report_id__in=report_ids,
             type__in=_ENGAGEMENT_ARTEFACT_TYPES,
+            # Attributed to a person. Pipeline writers attribute to a task or to the system (both
+            # NULL here), and several of them append log artefacts on their own — grouping writes a
+            # symmetric `related_to` when a resolved report recurs, autostart writes `task_run` — so
+            # counting those would let a scout keep itself alive with no human anywhere in the loop.
+            created_by__isnull=False,
             created_at__gte=window_start,
         ).values_list("report_id", flat=True)
     }

@@ -24,6 +24,11 @@ class Migration(migrations.Migration):
         ),
         migrations.AddField(
             model_name="signalscoutconfig",
+            name="auto_pause_reset_at",
+            field=models.DateTimeField(blank=True, null=True),
+        ),
+        migrations.AddField(
+            model_name="signalscoutconfig",
             name="auto_pause_warned_at",
             field=models.DateTimeField(blank=True, null=True),
         ),
