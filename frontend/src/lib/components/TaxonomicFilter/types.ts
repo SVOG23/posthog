@@ -233,6 +233,8 @@ export interface TaxonomicFilterGroup {
      * */
     categoryLabel?: (count: number) => ReactNode
     type: TaxonomicFilterGroupType
+    /** Canonical group used for values, persistence, recents, and pinning when this group is only a curated display category. */
+    sourceGroupType?: TaxonomicFilterGroupType
     /** Component to show instead of the usual taxonomic list. */
     render?: TaxonomicFilterRender
     /** if you want to override the default local items search behaviour e.g. for the replay group type */
@@ -343,7 +345,8 @@ export enum TaxonomicFilterGroupType {
     RevenueAnalyticsProperties = 'revenue_analytics_properties',
     AccountCustomProperties = 'account_custom_properties',
     Resources = 'resources',
-    ErrorTrackingProperties = 'error_tracking_properties',
+    // The serialized value is persisted in saved filters and URLs, so it remains stable for backward compatibility.
+    ExceptionProperties = 'error_tracking_properties',
     ActivityLogProperties = 'activity_log_properties',
     MCPProperties = 'mcp_properties',
     // Max AI Context

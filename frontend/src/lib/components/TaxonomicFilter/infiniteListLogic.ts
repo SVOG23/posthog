@@ -51,6 +51,7 @@ import {
     COLLAPSED_TO_CONTAINS_ROW,
     partitionContainsShortcuts,
 } from 'lib/components/TaxonomicFilter/utils/collapsedContainsRow'
+import { isFilterableExceptionPropertyForGroup } from 'lib/components/TaxonomicFilter/utils/errorTrackingProperties'
 import {
     floatRecentAndPinnedToTop,
     groupItemKey,
@@ -59,6 +60,7 @@ import {
 } from 'lib/components/TaxonomicFilter/utils/floatRecentPinned'
 import { floatToFront } from 'lib/components/TaxonomicFilter/utils/floatToFront'
 import { promoteMatchingProperties } from 'lib/components/TaxonomicFilter/utils/promoteProperties'
+import { resolveTaxonomicItemGroup as getItemGroup } from 'lib/components/TaxonomicFilter/utils/resolveTaxonomicItemGroup'
 import { FEATURE_FLAGS } from 'lib/constants'
 import { createFuse } from 'lib/utils/fuseSearch'
 import { mapGroupQueryResponse } from 'lib/utils/groups'
@@ -67,7 +69,6 @@ import { getCoreFilterDefinition } from '~/taxonomy/helpers'
 import { CohortType, EventDefinition, GroupTypeIndex, PropertyType } from '~/types'
 
 import { teamLogic } from '../../../scenes/teamLogic'
-import { getItemGroup } from './InfiniteList'
 import type { SelectItemMeta, TopMatchItem } from './taxonomicFilterLogic'
 
 function pinnedItemMatchesSearch(
@@ -1075,6 +1076,14 @@ export const infiniteListLogic = kea<infiniteListLogicType>([
                     if (!hasRecentContext(item) || !availableTypes.has(item._recentContext.sourceGroupType)) {
                         return false
                     }
+                    if (
+                        !isFilterableExceptionPropertyForGroup(
+                            item._recentContext.sourceGroupType,
+                            item._recentContext.sourceValue
+                        )
+                    ) {
+                        return false
+                    }
                     // A group's excluded values (e.g. `message` for the logs group-by picker) must be
                     // dropped from the Recent tab too, not just the group's own option list — otherwise
                     // an excluded key recorded elsewhere leaks back in as a selectable recent.
@@ -1107,7 +1116,13 @@ export const infiniteListLogic = kea<infiniteListLogicType>([
                 }
                 const availableTypes = new Set(taxonomicGroupTypes)
                 return pinnedFilterItems.filter(
-                    (item) => hasPinnedContext(item) && availableTypes.has(item._pinnedContext.sourceGroupType)
+                    (item) =>
+                        hasPinnedContext(item) &&
+                        availableTypes.has(item._pinnedContext.sourceGroupType) &&
+                        isFilterableExceptionPropertyForGroup(
+                            item._pinnedContext.sourceGroupType,
+                            item._pinnedContext.value
+                        )
                 )
             },
         ],

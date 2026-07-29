@@ -16,6 +16,11 @@ import {
     TaxonomicFilterGroupType,
     TaxonomicFilterValue,
 } from 'lib/components/TaxonomicFilter/types'
+import {
+    getCuratedExceptionPropertyExclusions,
+    getCuratedExceptionPropertyOptions,
+    getNonFilterableExceptionProperties,
+} from 'lib/components/TaxonomicFilter/utils/errorTrackingProperties'
 import { withKeywordShortcuts } from 'lib/components/TaxonomicFilter/utils/keywordShortcuts'
 import {
     MCP_TOOL_CALL_EVENT,
@@ -371,6 +376,8 @@ export function buildTaxonomicGroups(ctx: BuildTaxonomicGroupsContext): Taxonomi
                 // present — excluded via the same mechanism as TRAFFIC_TYPE_VIRTUAL_PROPERTIES
                 // above; the exclusivity intent is documented on getMCPExcludedEventProperties.
                 ...getMCPExcludedEventProperties(eventNames, ctx.taxonomicGroupTypes),
+                ...getNonFilterableExceptionProperties(),
+                ...getCuratedExceptionPropertyExclusions(ctx.taxonomicGroupTypes),
             ],
             propertyAllowList: propertyAllowList?.[TaxonomicFilterGroupType.EventProperties]?.filter(isString),
             ...withKeywordShortcuts<PropertyDefinition>(
@@ -479,21 +486,13 @@ export function buildTaxonomicGroups(ctx: BuildTaxonomicGroupsContext): Taxonomi
         {
             name: 'Exception properties',
             searchPlaceholder: 'exceptions',
-            type: TaxonomicFilterGroupType.ErrorTrackingProperties,
-            options: [
-                ...getProductEventPropertyFilterOptions('error-tracking').map((value) => ({
-                    name: value,
-                    value,
-                    group: TaxonomicFilterGroupType.EventProperties,
-                })),
-                ...(currentTeam?.person_display_name_properties
-                    ? currentTeam.person_display_name_properties.map((property) => ({
-                          name: property,
-                          value: property,
-                          group: TaxonomicFilterGroupType.PersonProperties,
-                      }))
-                    : []),
-            ],
+            type: TaxonomicFilterGroupType.ExceptionProperties,
+            sourceGroupType: TaxonomicFilterGroupType.EventProperties,
+            options: getCuratedExceptionPropertyOptions().map((value) => ({
+                name: value,
+                value,
+                group: TaxonomicFilterGroupType.EventProperties,
+            })),
             getIcon: getPropertyDefinitionIcon,
             getPopoverHeader: () => 'Exception properties',
         },

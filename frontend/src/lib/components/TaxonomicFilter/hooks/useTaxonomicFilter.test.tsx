@@ -297,6 +297,57 @@ describe('useTaxonomicFilter', () => {
         expect(result.current.searchQuery).toBe('')
     })
 
+    it.each([TaxonomicFilterGroupType.EventProperties, TaxonomicFilterGroupType.ExceptionProperties])(
+        'selects an exception display-category item declared as %s as an event property',
+        (declaredGroupType) => {
+            const onChange = jest.fn()
+            const { result } = renderHook(
+                () =>
+                    useTaxonomicFilter({
+                        taxonomicGroupTypes: [TaxonomicFilterGroupType.ExceptionProperties],
+                        onChange,
+                    }),
+                { wrapper }
+            )
+            const exceptionGroup = result.current.groups.find(
+                (group) => group.type === TaxonomicFilterGroupType.ExceptionProperties
+            )!
+            const item = {
+                name: '$exception_values',
+                value: '$exception_values',
+                group: declaredGroupType,
+            }
+
+            act(() => result.current.selectItem(exceptionGroup, '$exception_values', item))
+
+            expect(onChange).toHaveBeenCalledWith(
+                expect.objectContaining({ type: TaxonomicFilterGroupType.EventProperties }),
+                '$exception_values',
+                item
+            )
+        }
+    )
+
+    it('uses canonical event-property exclusions for the exception display category', () => {
+        const { result } = renderHook(
+            () =>
+                useTaxonomicFilter({
+                    taxonomicGroupTypes: [TaxonomicFilterGroupType.ExceptionProperties],
+                }),
+            { wrapper }
+        )
+
+        expect(result.current.groups[0].sourceGroupType).toBe(TaxonomicFilterGroupType.EventProperties)
+        expect(result.current.excludedProperties?.[TaxonomicFilterGroupType.EventProperties]).toEqual(
+            expect.arrayContaining([
+                '$exception_values',
+                '$exception_steps',
+                '$exception_list',
+                '$exception_fingerprint_record',
+            ])
+        )
+    })
+
     it('selectItem records recents under an option-declared group, not the curated tab group', async () => {
         // Mirrors legacy `getItemGroup` resolution: without the remap, an MCP-tab pick is
         // recorded as `mcp_properties` while legacy records `event_properties`, and the
