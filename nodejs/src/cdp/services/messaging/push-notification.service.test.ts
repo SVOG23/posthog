@@ -165,20 +165,22 @@ describe('PushNotificationService', () => {
             await service.executeSendPushNotification(invocation)
 
             const body = parseJSON(mockTrackedFetch.mock.calls[0][0].fetchParams.body)
-            expect(body.message.data).toMatchObject({
-                posthog_workflow_id: invocation.functionId,
-                posthog_action_id: 'push-step',
-                posthog_invocation_id: invocation.id,
+            // Nested under the single `posthog` key, JSON-encoded: that is the only entry the SDKs read,
+            // and FCM's `data` map only accepts string values. Sibling keys would be silently ignored.
+            expect(parseJSON(body.message.data.posthog)).toEqual({
+                workflow_id: invocation.functionId,
+                action_id: 'push-step',
+                invocation_id: invocation.id,
             })
         })
 
-        it('does not let a custom data key shadow a correlation id', async () => {
+        it('does not let a custom data key shadow the correlation payload', async () => {
             // `data` is customer-controlled. If a custom key could win, opens would be attributed to
-            // whatever workflow the sender named, so the reserved keys have to be applied last.
+            // whatever workflow the sender named, so the reserved key has to be applied last.
             const invocation = createSendPushNotificationInvocation({
                 '$device_push_subscription_test-project': encryptedFields.encrypt('device-token-123'),
             })
-            ;(invocation.queueParameters as any).payload.data = { posthog_workflow_id: 'not-the-real-workflow' }
+            ;(invocation.queueParameters as any).payload.data = { posthog: 'not-the-real-workflow' }
             mockTrackedFetch.mockResolvedValue({
                 fetchError: null,
                 fetchResponse: {
@@ -192,7 +194,7 @@ describe('PushNotificationService', () => {
             await service.executeSendPushNotification(invocation)
 
             const body = parseJSON(mockTrackedFetch.mock.calls[0][0].fetchParams.body)
-            expect(body.message.data.posthog_workflow_id).toBe(invocation.functionId)
+            expect(parseJSON(body.message.data.posthog).workflow_id).toBe(invocation.functionId)
         })
 
         it('returns result with metric push_sent on success', async () => {

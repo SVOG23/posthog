@@ -108,20 +108,25 @@ function backoffAt(baseMs: number, maxMs: number, tries: number): DateTime {
 // captured open event, which is what lets an open be attributed to the workflow and step that sent it.
 // Without them an open is only ever a global count.
 //
-// `posthog_` prefixed so the mobile SDKs recognize them as ours rather than app routing data, and so a
-// customer's own `data` keys can't be confused for them. Reserved: these win over same-named custom keys.
-const PUSH_CORRELATION_PREFIX = 'posthog_'
+// The key and the shape are fixed by the mobile SDKs: both read the single `posthog` entry out of the
+// notification payload and re-emit each of its keys as `$notification_<key>` on `$push_notification_opened`.
+// Nothing outside that entry is read, so these ids have to be nested under it rather than sent as
+// sibling keys.
+const PUSH_CORRELATION_KEY = 'posthog'
 
+// Serialized rather than nested as an object because FCM's `data` map only accepts string values. Both
+// SDKs parse this entry from either a dictionary or a JSON string, on either delivery route, so one
+// encoding covers FCM and direct APNs.
 function pushCorrelationData(invocation: CyclotronJobInvocationHogFunction): Record<string, string> {
     const correlation: Record<string, string> = {
-        [`${PUSH_CORRELATION_PREFIX}workflow_id`]: invocation.functionId,
-        [`${PUSH_CORRELATION_PREFIX}invocation_id`]: invocation.id,
+        workflow_id: invocation.functionId,
+        invocation_id: invocation.id,
     }
     // Absent for a push sent outside a workflow step, where there is no step to attribute an open to.
     if (invocation.state.actionId) {
-        correlation[`${PUSH_CORRELATION_PREFIX}action_id`] = invocation.state.actionId
+        correlation.action_id = invocation.state.actionId
     }
-    return correlation
+    return { [PUSH_CORRELATION_KEY]: JSON.stringify(correlation) }
 }
 
 function pushSendError(platform: PushPlatform, err: NormalizedPushError, retryAfterMs?: number): PushSendError {
