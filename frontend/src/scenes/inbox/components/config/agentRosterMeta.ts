@@ -71,7 +71,7 @@ export const AGENT_ROSTER_GROUPS: AgentRosterGroup[] = [
                 source: 'llm_analytics',
                 sourceProduct: SignalSourceProduct.LlmAnalytics,
                 label: 'AI observability',
-                description: 'Findings from evaluation reports on your LLM traffic.',
+                description: 'Signals from evaluation reports on your LLM traffic.',
                 docsUrl: 'https://posthog.com/docs/ai-evals/evaluations',
                 docsLabel: 'AI observability',
             },
