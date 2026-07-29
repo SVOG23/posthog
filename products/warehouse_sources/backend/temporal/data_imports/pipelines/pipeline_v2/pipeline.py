@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import time
 from typing import Any, Generic, Literal
@@ -25,6 +26,7 @@ from products.warehouse_sources.backend.temporal.data_imports.pipelines.common.e
     finalize_desc_sort_incremental_value,
     handle_corrupted_delta_log,
     handle_reset_or_full_refresh,
+    persist_keyset_resume_state,
     persist_primary_keys,
     person_property_sink_clear_chunks,
     reset_rows_synced_if_needed,
@@ -170,7 +172,9 @@ class PipelineNonDLT(Generic[ResumableData]):
         pa_memory_pool = pa.default_memory_pool()
 
         should_resume = self._resumable_source_manager is not None and self._resumable_source_manager.can_resume()
-        source_is_resumable = self._resumable_source_manager is not None
+        # A resumable-source class whose current run can't actually resume (e.g. a SQL full load with
+        # no orderable primary key) reports `supports_resume=False`, so it's treated as non-resumable.
+        source_is_resumable = self._resumable_source_manager is not None and self._resource.supports_resume
         if should_resume:
             await self._logger.ainfo("Resumable source detected - attempting to resume previous import")
 
@@ -277,6 +281,11 @@ class PipelineNonDLT(Generic[ResumableData]):
 
             await advance_xmin_state(self._resource, self._schema, self._logger)
 
+            # Load walked to completion — drop the keyset checkpoint so the next scheduled sync starts
+            # fresh instead of resuming mid-table. No-op for non-keyset runs.
+            if self._resource.resume_keyset_column is not None and self._resumable_source_manager is not None:
+                await asyncio.to_thread(self._resumable_source_manager.clear_state)
+
             result = PipelineResult(should_trigger_cdp_producer=await self._cdp_producer.should_produce_table())
             if isinstance(prepared_queryable_folder, str):
                 result["prepared_queryable_folder"] = prepared_queryable_folder
@@ -379,6 +388,11 @@ class PipelineNonDLT(Generic[ResumableData]):
             self._last_incremental_field_value,
             self._earliest_incremental_field_value,
             self._logger,
+        )
+
+        # Keyset-resumable full loads checkpoint the committed max PK so a fresh pod resumes here.
+        await persist_keyset_resume_state(
+            self._resumable_source_manager, self._resource.resume_keyset_column, pa_table, self._logger
         )
 
         await update_row_tracking_after_batch(
