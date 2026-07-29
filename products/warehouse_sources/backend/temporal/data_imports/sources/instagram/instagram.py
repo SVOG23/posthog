@@ -1,6 +1,4 @@
 import re
-import hmac
-import hashlib
 import dataclasses
 from collections.abc import Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -20,11 +18,12 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.
     ACCOUNT_INSIGHTS_WINDOW_DAYS,
     DEFAULT_INSIGHTS_LOOKBACK_DAYS,
     DEFAULT_MEDIA_INSIGHT_METRICS,
+    GRAPH_API_HOST,
     INSTAGRAM_ENDPOINTS,
-    INSTAGRAM_HOSTS,
     MAX_INSIGHTS_LOOKBACK_DAYS,
     MEDIA_INSIGHT_METRICS,
     MEDIA_PARENT_FIELDS,
+    PAGE_FIELDS,
     PAGE_SIZE,
     InstagramEndpointConfig,
 )
@@ -150,27 +149,19 @@ def _with_query_param(url: str, name: str, value: str) -> str:
 class InstagramClient:
     """Thin Graph API client.
 
-    Hand-rolled rather than declarative because a single Instagram sync has to switch
-    hosts per login type, sign every request with an HMAC proof, walk insight windows,
-    and demote a metric Meta has retired — none of which the shared `rest_source`
+    Hand-rolled rather than declarative because a single Instagram sync has to walk insight
+    windows and demote a metric Meta has retired, neither of which the shared `rest_source`
     endpoint config can express.
     """
 
     def __init__(
         self,
         access_token: str,
-        login_type: str,
         api_version: str,
         logger: FilteringBoundLogger,
-        app_secret: Optional[str] = None,
     ) -> None:
-        host = INSTAGRAM_HOSTS.get(login_type)
-        if host is None:
-            raise ValueError(f"Unknown Instagram login type: {login_type}")
-
-        self._base_url = f"{host}/{api_version}"
+        self._base_url = f"{GRAPH_API_HOST}/{api_version}"
         self._access_token = access_token
-        self._app_secret = app_secret or None
         self._logger = logger
         # The transport's status retries are disabled so they don't compound with the
         # tenacity loop below, which also has to catch Meta's throttling error codes
@@ -178,29 +169,15 @@ class InstagramClient:
         self._session = make_tracked_session(
             headers={"Accept": "application/json"},
             retry=Retry(total=0),
-            redact_values=tuple(value for value in (access_token, self._app_secret) if value),
+            redact_values=(access_token,),
             # Graph API responses carry user-authored content — bios, captions, comments,
             # usernames — that the name-based scrubbers can't recognise, so keep these
             # bodies out of the shared HTTP sample bucket while still metering the calls.
             capture=False,
         )
 
-    def appsecret_proof(self) -> Optional[str]:
-        """HMAC-SHA256 of the access token, keyed by the app secret.
-
-        Meta requires it on every call once an app turns on "Require App Secret", and
-        accepts it silently otherwise.
-        """
-        if not self._app_secret:
-            return None
-        return hmac.new(self._app_secret.encode(), self._access_token.encode(), hashlib.sha256).hexdigest()
-
     def build_url(self, path: str, params: Optional[dict[str, str]] = None) -> str:
-        merged: dict[str, str] = dict(params or {})
-        proof = self.appsecret_proof()
-        if proof is not None:
-            merged["appsecret_proof"] = proof
-        query = urlencode(merged)
+        query = urlencode(dict(params or {}))
         url = f"{self._base_url}/{path.strip('/')}"
         return f"{url}?{query}" if query else url
 
@@ -261,10 +238,9 @@ def _iter_pages(
 ) -> Iterator[tuple[list[dict[str, Any]], Optional[str]]]:
     """Yield `(rows, next_url)` per page of a cursor-paginated edge.
 
-    Meta hands back both a ready-made `paging.next` and the raw `after` cursor. We
-    rebuild the URL from the cursor instead of following `paging.next` so the resume
-    checkpoint is a URL we constructed — one that always carries the app secret proof,
-    whatever Meta chose to echo back.
+    Meta hands back both a ready-made `paging.next` and the raw `after` cursor. We rebuild
+    the URL from the cursor instead of following `paging.next`, so the resume checkpoint is
+    a URL we constructed and Meta can't echo the access token into our saved state.
     """
     pages = 0
     current: Optional[str] = url
@@ -282,10 +258,10 @@ def _iter_pages(
         pages += 1
 
 
-def _account_path(instagram_account_id: Optional[str], edge: str = "") -> str:
-    # `me` resolves to the token's own Instagram account, which only holds for tokens
-    # minted by Instagram Login — Facebook Login tokens are scoped to a person.
-    node = instagram_account_id.strip() if instagram_account_id and instagram_account_id.strip() else "me"
+def _account_path(instagram_account_id: str, edge: str = "") -> str:
+    # A Facebook Login token is scoped to a person, so `me` would resolve to the Facebook
+    # user rather than the Instagram account. Every request names the account node.
+    node = instagram_account_id.strip()
     return f"{node}/{edge}" if edge else node
 
 
@@ -309,7 +285,7 @@ def _insight_points(entry: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _media_rows(
     client: InstagramClient,
-    instagram_account_id: Optional[str],
+    instagram_account_id: str,
     config: InstagramEndpointConfig,
     resumable_source_manager: ResumableSourceManager[InstagramResumeConfig],
     logger: FilteringBoundLogger,
@@ -335,7 +311,7 @@ def _media_rows(
 
 def _account_row(
     client: InstagramClient,
-    instagram_account_id: Optional[str],
+    instagram_account_id: str,
     config: InstagramEndpointConfig,
 ) -> Iterator[list[dict[str, Any]]]:
     body = client.get(client.build_url(_account_path(instagram_account_id), {"fields": config.fields}))
@@ -345,7 +321,7 @@ def _account_row(
 
 def _fanout_rows(
     client: InstagramClient,
-    instagram_account_id: Optional[str],
+    instagram_account_id: str,
     config: InstagramEndpointConfig,
     resumable_source_manager: ResumableSourceManager[InstagramResumeConfig],
     logger: FilteringBoundLogger,
@@ -461,7 +437,7 @@ def _insight_windows(since: int, until: int, window_days: int = ACCOUNT_INSIGHTS
 
 def _account_insight_plan(
     client: InstagramClient,
-    instagram_account_id: Optional[str],
+    instagram_account_id: str,
     since: int,
     until: int,
 ) -> list[list[tuple[str, str]]]:
@@ -498,8 +474,7 @@ def _account_insight_plan(
 
 def _account_insight_rows(
     client: InstagramClient,
-    instagram_account_id: Optional[str],
-    account_node_id: str,
+    instagram_account_id: str,
     config: InstagramEndpointConfig,
     resumable_source_manager: ResumableSourceManager[InstagramResumeConfig],
     logger: FilteringBoundLogger,
@@ -548,7 +523,7 @@ def _account_insight_rows(
                         continue
                     rows.append(
                         {
-                            "instagram_account_id": account_node_id,
+                            "instagram_account_id": instagram_account_id,
                             "metric": entry.get("name") or metric,
                             "period": entry.get("period"),
                             "date": _normalize_timestamp(end_time),
@@ -585,79 +560,85 @@ def _resume_url(
     return state.next_url
 
 
+def list_professional_accounts(
+    access_token: str,
+    api_version: str,
+    logger: FilteringBoundLogger,
+) -> list[dict[str, Any]]:
+    """Every Instagram professional account reachable through the connected Facebook user's pages.
+
+    A page with no linked professional account is skipped rather than offered as a choice that
+    can never sync.
+    """
+    client = InstagramClient(access_token=access_token, api_version=api_version, logger=logger)
+    url = client.build_url("me/accounts", {"fields": PAGE_FIELDS, "limit": str(PAGE_SIZE)})
+
+    accounts: list[dict[str, Any]] = []
+    for pages, _ in _iter_pages(client, url, MAX_PAGES_PER_STREAM):
+        for page in pages:
+            linked = page.get("instagram_business_account")
+            if not isinstance(linked, dict) or not linked.get("id"):
+                continue
+            accounts.append(
+                {
+                    "id": str(linked["id"]),
+                    "username": linked.get("username"),
+                    "name": linked.get("name"),
+                    "page_name": page.get("name"),
+                }
+            )
+
+    return accounts
+
+
 def validate_credentials(
     access_token: str,
-    login_type: str,
     api_version: str,
     logger: FilteringBoundLogger,
     instagram_account_id: Optional[str] = None,
-    app_secret: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
-    """Probe the account node to confirm the token resolves to an Instagram account."""
+    """Probe the account node to confirm the token can read the chosen Instagram account."""
     account_id = (instagram_account_id or "").strip()
-    if login_type == "facebook" and not account_id:
-        return False, (
-            "Enter the Instagram account ID. A Facebook Login token is scoped to a person, "
-            "so it can't resolve the account on its own."
-        )
+    if not account_id:
+        return False, "Choose the Instagram account you want to sync."
     # The account ID is spliced straight into the Graph API path, so anything but the plain
     # numeric node ID could select a different object or inject extra path/query segments.
-    if account_id and not _NUMERIC_ACCOUNT_ID.match(account_id):
-        return (
-            False,
-            "The Instagram account ID must be numeric — copy it exactly from your account (e.g. 17841400000000000).",
-        )
+    if not _NUMERIC_ACCOUNT_ID.match(account_id):
+        return False, "That is not a valid Instagram account. Pick the account again from the list."
 
-    try:
-        client = InstagramClient(
-            access_token=access_token,
-            login_type=login_type,
-            api_version=api_version,
-            logger=logger,
-            app_secret=app_secret,
-        )
-    except ValueError as error:
-        return False, str(error)
+    client = InstagramClient(access_token=access_token, api_version=api_version, logger=logger)
 
     try:
         body = client.get(client.build_url(_account_path(account_id), {"fields": "id,username"}))
     except InstagramAuthError:
-        return False, "The Instagram access token is invalid or has expired. Generate a new one and reconnect."
+        return False, "The Instagram connection has expired. Reconnect your Instagram account and try again."
     except InstagramPermissionError:
         return False, (
-            "The Instagram access token is missing the permissions this source needs "
-            "(instagram_basic and instagram_manage_insights)."
+            "The Instagram connection is missing permissions this source needs. Reconnect it and grant "
+            "access to your page, Instagram insights and comments."
         )
     except Exception:
-        return False, "Could not reach the Instagram API with these credentials."
+        return False, "Could not reach the Instagram API with this connection."
 
     if not body.get("id"):
-        return False, "That Instagram account ID did not resolve to a professional Instagram account."
+        return False, "That account is not an Instagram professional account. Pick a different account."
 
     return True, None
 
 
 def get_rows(
     access_token: str,
-    login_type: str,
     api_version: str,
     endpoint: str,
     logger: FilteringBoundLogger,
     resumable_source_manager: ResumableSourceManager[InstagramResumeConfig],
-    instagram_account_id: Optional[str] = None,
-    app_secret: Optional[str] = None,
+    instagram_account_id: str,
     start_date: Optional[str] = None,
     should_use_incremental_field: bool = False,
     db_incremental_field_last_value: Any = None,
 ) -> Iterator[list[dict[str, Any]]]:
     config = INSTAGRAM_ENDPOINTS[endpoint]
-    client = InstagramClient(
-        access_token=access_token,
-        login_type=login_type,
-        api_version=api_version,
-        logger=logger,
-        app_secret=app_secret,
-    )
+    client = InstagramClient(access_token=access_token, api_version=api_version, logger=logger)
 
     since: Optional[int] = None
     if config.supports_time_window:
@@ -672,7 +653,6 @@ def get_rows(
         yield from _account_insight_rows(
             client=client,
             instagram_account_id=instagram_account_id,
-            account_node_id=(instagram_account_id or "").strip() or "me",
             config=config,
             resumable_source_manager=resumable_source_manager,
             logger=logger,
@@ -686,13 +666,11 @@ def get_rows(
 
 def instagram_source(
     access_token: str,
-    login_type: str,
     api_version: str,
     endpoint: str,
     logger: FilteringBoundLogger,
     resumable_source_manager: ResumableSourceManager[InstagramResumeConfig],
-    instagram_account_id: Optional[str] = None,
-    app_secret: Optional[str] = None,
+    instagram_account_id: str,
     start_date: Optional[str] = None,
     should_use_incremental_field: bool = False,
     db_incremental_field_last_value: Any = None,
@@ -703,13 +681,11 @@ def instagram_source(
         name=endpoint,
         items=lambda: get_rows(
             access_token=access_token,
-            login_type=login_type,
             api_version=api_version,
             endpoint=endpoint,
             logger=logger,
             resumable_source_manager=resumable_source_manager,
             instagram_account_id=instagram_account_id,
-            app_secret=app_secret,
             start_date=start_date,
             should_use_incremental_field=should_use_incremental_field,
             db_incremental_field_last_value=db_incremental_field_last_value,

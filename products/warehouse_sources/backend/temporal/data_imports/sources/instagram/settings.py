@@ -5,13 +5,10 @@ from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import incremental_field
 from products.warehouse_sources.backend.types import IncrementalField
 
-# Meta hosts the same Instagram Platform surface twice: the token minted by Instagram
-# Login only works against graph.instagram.com, the one minted by Facebook Login only
-# against graph.facebook.com.
-INSTAGRAM_HOSTS: dict[str, str] = {
-    "instagram": "https://graph.instagram.com",
-    "facebook": "https://graph.facebook.com",
-}
+# PostHog's Meta app authorizes through Facebook Login, so the Instagram Platform surface is
+# reached on graph.facebook.com. (graph.instagram.com serves the same edges, but only for
+# tokens minted by Instagram Login.)
+GRAPH_API_HOST = "https://graph.facebook.com"
 
 # Node/edge field selections. Meta returns nothing but `id` unless `fields` is passed,
 # so every request names its columns explicitly.
@@ -25,6 +22,9 @@ COMMENT_FIELDS = "id,text,timestamp,username,like_count,hidden"
 # Parent listing for the fan-out endpoints — only what the child rows need to be keyed
 # and partitioned, so the fan-out doesn't pay for the full media projection.
 MEDIA_PARENT_FIELDS = "id,timestamp,media_product_type"
+# Page listing used by the account picker. A professional Instagram account is only
+# reachable through the Facebook Page it is linked to, so the picker walks the pages.
+PAGE_FIELDS = "name,instagram_business_account{id,username,name}"
 
 # Rows per page. Meta caps the media edge at 100 and silently clamps anything larger.
 PAGE_SIZE = 100

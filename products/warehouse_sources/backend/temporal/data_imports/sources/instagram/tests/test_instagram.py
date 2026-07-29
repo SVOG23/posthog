@@ -1,5 +1,3 @@
-import hmac
-import hashlib
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any, Optional, cast
@@ -29,6 +27,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.
     _with_query_param,
     get_rows,
     instagram_source,
+    list_professional_accounts,
     validate_credentials,
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.settings import (
@@ -41,6 +40,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.
 
 MODULE = "products.warehouse_sources.backend.temporal.data_imports.sources.instagram.instagram"
 LOGGER = structlog.get_logger("instagram-tests")
+ACCOUNT_ID = "17841400000000000"
 
 
 class FakeResponse:
@@ -108,7 +108,7 @@ class FakeResumableSourceManager(ResumableSourceManager[InstagramResumeConfig]):
 def _page(rows: Iterable[dict[str, Any]], after: Optional[str] = None) -> dict[str, Any]:
     body: dict[str, Any] = {"data": list(rows)}
     if after is not None:
-        body["paging"] = {"cursors": {"after": after}, "next": "https://graph.instagram.com/next"}
+        body["paging"] = {"cursors": {"after": after}, "next": "https://graph.facebook.com/next"}
     return body
 
 
@@ -119,11 +119,11 @@ def _collect(
     **kwargs: Any,
 ) -> list[dict[str, Any]]:
     resume_manager = manager or FakeResumableSourceManager()
+    kwargs.setdefault("instagram_account_id", ACCOUNT_ID)
     with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
         batches = list(
             get_rows(
                 access_token="tok",
-                login_type="instagram",
                 api_version="v23.0",
                 endpoint=endpoint,
                 logger=LOGGER,
@@ -135,39 +135,29 @@ def _collect(
 
 
 class TestInstagramTransport:
-    def test_build_url_targets_the_host_for_the_login_type(self) -> None:
+    def test_every_request_is_addressed_to_the_chosen_account_node(self) -> None:
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=FakeSession()):
-            instagram = InstagramClient("tok", "instagram", "v23.0", LOGGER)
-            facebook = InstagramClient("tok", "facebook", "v23.0", LOGGER)
+            client = InstagramClient("tok", "v23.0", LOGGER)
 
-        assert instagram.build_url("me/media").startswith("https://graph.instagram.com/v23.0/me/media")
-        assert facebook.build_url("123/media").startswith("https://graph.facebook.com/v23.0/123/media")
+        # A Facebook Login token is scoped to a person, so `me` would resolve to the Facebook
+        # user rather than the Instagram account.
+        assert client.build_url(f"{ACCOUNT_ID}/media").startswith(
+            f"https://graph.facebook.com/v23.0/{ACCOUNT_ID}/media"
+        )
 
-    def test_unknown_login_type_is_rejected(self) -> None:
-        with mock.patch(f"{MODULE}.make_tracked_session", return_value=FakeSession()):
-            with pytest.raises(ValueError, match="Unknown Instagram login type"):
-                InstagramClient("tok", "threads", "v23.0", LOGGER)
+    def test_the_access_token_never_rides_in_the_query_string(self) -> None:
+        session = FakeSession([(ACCOUNT_ID, FakeResponse(200, {"id": ACCOUNT_ID}))])
+        with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
+            client = InstagramClient("tok", "v23.0", LOGGER)
+            client.get(client.build_url(ACCOUNT_ID))
 
-    def test_app_secret_produces_the_hmac_proof_meta_expects(self) -> None:
-        with mock.patch(f"{MODULE}.make_tracked_session", return_value=FakeSession()):
-            client = InstagramClient("tok", "instagram", "v23.0", LOGGER, app_secret="s3cret")
-
-        expected = hmac.new(b"s3cret", b"tok", hashlib.sha256).hexdigest()
-        assert client.appsecret_proof() == expected
-        assert f"appsecret_proof={expected}" in client.build_url("me")
-
-    def test_no_app_secret_means_no_proof_param(self) -> None:
-        with mock.patch(f"{MODULE}.make_tracked_session", return_value=FakeSession()):
-            client = InstagramClient("tok", "instagram", "v23.0", LOGGER)
-
-        assert client.appsecret_proof() is None
-        assert "appsecret_proof" not in client.build_url("me")
+        assert "tok" not in session.requested_urls[0]
 
     def test_graph_responses_are_kept_out_of_the_http_sample_bucket(self) -> None:
         # Graph API bodies carry user-authored content (bios, captions, comments) the
         # generic scrubbers can't redact, so the session must opt out of sample capture.
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=FakeSession()) as factory:
-            InstagramClient("tok", "instagram", "v23.0", LOGGER)
+            InstagramClient("tok", "v23.0", LOGGER)
 
         assert factory.call_args.kwargs["capture"] is False
 
@@ -260,12 +250,12 @@ class TestInstagramTransport:
     def test_permanent_errors_are_classified_from_status_and_meta_error_code(
         self, status_code: int, payload: Any, expected: type[Exception]
     ) -> None:
-        session = FakeSession([("me", FakeResponse(status_code, payload, text="body"))])
+        session = FakeSession([(ACCOUNT_ID, FakeResponse(status_code, payload, text="body"))])
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            client = InstagramClient("tok", "instagram", "v23.0", LOGGER)
+            client = InstagramClient("tok", "v23.0", LOGGER)
 
         with pytest.raises(expected):
-            client.get(client.build_url("me"))
+            client.get(client.build_url(ACCOUNT_ID))
 
         # A permanent failure must not be retried — Meta's throttle budget is per app.
         assert len(session.requested_urls) == 1
@@ -283,12 +273,12 @@ class TestInstagramTransport:
         ],
     )
     def test_throttling_and_transient_errors_are_retried_then_surfaced(self, status_code: int, payload: Any) -> None:
-        session = FakeSession([("me", FakeResponse(status_code, payload, repeat=True))])
+        session = FakeSession([(ACCOUNT_ID, FakeResponse(status_code, payload, repeat=True))])
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            client = InstagramClient("tok", "instagram", "v23.0", LOGGER)
+            client = InstagramClient("tok", "v23.0", LOGGER)
 
         with pytest.raises(InstagramRetryableError):
-            client.get(client.build_url("me"))
+            client.get(client.build_url(ACCOUNT_ID))
 
         assert len(session.requested_urls) == MAX_RETRY_ATTEMPTS
 
@@ -302,25 +292,25 @@ class TestInstagramTransport:
     def test_permanent_failures_carry_the_prefix_the_source_matches_on(
         self, status_code: int, code: int, prefix: str
     ) -> None:
-        session = FakeSession([("me", FakeResponse(status_code, {"error": {"code": code, "message": "nope"}}))])
+        session = FakeSession([(ACCOUNT_ID, FakeResponse(status_code, {"error": {"code": code, "message": "nope"}}))])
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            client = InstagramClient("tok", "instagram", "v23.0", LOGGER)
+            client = InstagramClient("tok", "v23.0", LOGGER)
 
         with pytest.raises(Exception) as error:
-            client.get(client.build_url("me"))
+            client.get(client.build_url(ACCOUNT_ID))
 
         assert prefix in str(error.value)
 
     def test_a_throttled_request_is_retried_and_then_succeeds(self) -> None:
         session = FakeSession(
             [
-                ("me", FakeResponse(429, {"error": {"code": 4, "message": "throttled"}})),
-                ("me", FakeResponse(200, {"id": "1"})),
+                (ACCOUNT_ID, FakeResponse(429, {"error": {"code": 4, "message": "throttled"}})),
+                (ACCOUNT_ID, FakeResponse(200, {"id": "1"})),
             ]
         )
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            client = InstagramClient("tok", "instagram", "v23.0", LOGGER)
-            assert client.get(client.build_url("me")) == {"id": "1"}
+            client = InstagramClient("tok", "v23.0", LOGGER)
+            assert client.get(client.build_url(ACCOUNT_ID)) == {"id": "1"}
 
         assert len(session.requested_urls) == 2
 
@@ -329,7 +319,10 @@ class TestInstagramEdges:
     def test_media_pages_until_meta_stops_returning_a_cursor(self) -> None:
         session = FakeSession(
             [
-                ("me/media", FakeResponse(200, _page([{"id": "1", "timestamp": "2024-03-01T18:10:00+0000"}], "CUR"))),
+                (
+                    f"{ACCOUNT_ID}/media",
+                    FakeResponse(200, _page([{"id": "1", "timestamp": "2024-03-01T18:10:00+0000"}], "CUR")),
+                ),
                 ("after=CUR", FakeResponse(200, _page([{"id": "2", "timestamp": "2024-02-01T00:00:00+0000"}]))),
             ]
         )
@@ -344,7 +337,7 @@ class TestInstagramEdges:
 
     def test_media_stops_when_the_cursor_is_missing_even_though_next_is_present(self) -> None:
         session = FakeSession(
-            [("me/media", FakeResponse(200, {"data": [{"id": "1"}], "paging": {"next": "https://x/next"}}))]
+            [(f"{ACCOUNT_ID}/media", FakeResponse(200, {"data": [{"id": "1"}], "paging": {"next": "https://x/next"}}))]
         )
 
         rows = _collect("media", session)
@@ -381,7 +374,7 @@ class TestInstagramEdges:
     def test_the_next_page_is_checkpointed_only_after_its_rows_are_yielded(self) -> None:
         session = FakeSession(
             [
-                ("me/media", FakeResponse(200, _page([{"id": "1"}], "CUR"))),
+                (f"{ACCOUNT_ID}/media", FakeResponse(200, _page([{"id": "1"}], "CUR"))),
                 ("after=CUR", FakeResponse(200, _page([{"id": "2"}]))),
             ]
         )
@@ -395,34 +388,28 @@ class TestInstagramEdges:
     def test_a_saved_checkpoint_restarts_mid_stream_instead_of_from_page_one(self) -> None:
         session = FakeSession([("after=CUR", FakeResponse(200, _page([{"id": "2"}])))])
         manager = FakeResumableSourceManager(
-            InstagramResumeConfig(next_url="https://graph.instagram.com/v23.0/me/media?limit=100&after=CUR")
+            InstagramResumeConfig(next_url="https://graph.facebook.com/v23.0/me/media?limit=100&after=CUR")
         )
 
         rows = _collect("media", session, manager)
 
         assert [row["id"] for row in rows] == ["2"]
-        assert session.requested_urls == ["https://graph.instagram.com/v23.0/me/media?limit=100&after=CUR"]
+        assert session.requested_urls == ["https://graph.facebook.com/v23.0/me/media?limit=100&after=CUR"]
 
-    def test_the_account_endpoint_yields_the_node_itself(self) -> None:
-        session = FakeSession([("me?", FakeResponse(200, {"id": "17841", "username": "posthog"}))])
+    def test_the_account_endpoint_yields_the_chosen_account_node(self) -> None:
+        session = FakeSession([(f"{ACCOUNT_ID}?", FakeResponse(200, {"id": ACCOUNT_ID, "username": "posthog"}))])
 
         rows = _collect("account", session)
 
-        assert rows == [{"id": "17841", "username": "posthog"}]
-
-    def test_an_account_id_replaces_the_me_alias(self) -> None:
-        session = FakeSession([("17841", FakeResponse(200, {"id": "17841"}))])
-
-        _collect("account", session, instagram_account_id="17841")
-
-        assert "/v23.0/17841?" in session.requested_urls[0]
+        assert rows == [{"id": ACCOUNT_ID, "username": "posthog"}]
+        assert f"/v23.0/{ACCOUNT_ID}?" in session.requested_urls[0]
 
 
 class TestInstagramFanOut:
     def test_comments_carry_the_parent_media_id(self) -> None:
         session = FakeSession(
             [
-                ("me/media", FakeResponse(200, _page([{"id": "m1"}, {"id": "m2"}]))),
+                (f"{ACCOUNT_ID}/media", FakeResponse(200, _page([{"id": "m1"}, {"id": "m2"}]))),
                 ("m1/comments", FakeResponse(200, _page([{"id": "c1", "timestamp": "2024-03-01T18:10:00+0000"}]))),
                 ("m2/comments", FakeResponse(200, _page([{"id": "c2"}]))),
             ]
@@ -436,7 +423,7 @@ class TestInstagramFanOut:
     def test_a_post_with_comments_disabled_is_skipped_rather_than_failing_the_table(self) -> None:
         session = FakeSession(
             [
-                ("me/media", FakeResponse(200, _page([{"id": "m1"}, {"id": "m2"}]))),
+                (f"{ACCOUNT_ID}/media", FakeResponse(200, _page([{"id": "m1"}, {"id": "m2"}]))),
                 ("m1/comments", FakeResponse(400, {"error": {"code": 100, "message": "comments disabled"}})),
                 ("m2/comments", FakeResponse(200, _page([{"id": "c2"}]))),
             ]
@@ -449,7 +436,7 @@ class TestInstagramFanOut:
     @pytest.mark.parametrize("product_type", ["FEED", "REELS", "STORY"])
     def test_media_insights_request_the_metric_set_for_the_media_type(self, product_type: str) -> None:
         session = FakeSession(
-            [("me/media", FakeResponse(200, _page([{"id": "m1", "media_product_type": product_type}])))]
+            [(f"{ACCOUNT_ID}/media", FakeResponse(200, _page([{"id": "m1", "media_product_type": product_type}])))]
         )
 
         _collect("media_insights", session)
@@ -461,7 +448,7 @@ class TestInstagramFanOut:
         session = FakeSession(
             [
                 (
-                    "me/media",
+                    f"{ACCOUNT_ID}/media",
                     FakeResponse(
                         200,
                         _page([{"id": "m1", "media_product_type": "FEED", "timestamp": "2024-03-01T18:10:00+0000"}]),
@@ -492,7 +479,7 @@ class TestInstagramFanOut:
     def test_a_post_meta_refuses_to_report_on_is_skipped(self) -> None:
         session = FakeSession(
             [
-                ("me/media", FakeResponse(200, _page([{"id": "m1", "media_product_type": "FEED"}]))),
+                (f"{ACCOUNT_ID}/media", FakeResponse(200, _page([{"id": "m1", "media_product_type": "FEED"}]))),
                 ("m1/insights", FakeResponse(400, {"error": {"code": 100, "message": "unsupported metric"}})),
             ]
         )
@@ -502,7 +489,7 @@ class TestInstagramFanOut:
     def test_the_parent_page_is_checkpointed_once_its_children_are_drained(self) -> None:
         session = FakeSession(
             [
-                ("me/media", FakeResponse(200, _page([{"id": "m1"}], "CUR"))),
+                (f"{ACCOUNT_ID}/media", FakeResponse(200, _page([{"id": "m1"}], "CUR"))),
                 ("m1/comments", FakeResponse(200, _page([{"id": "c1"}]))),
                 ("after=CUR", FakeResponse(200, _page([{"id": "m2"}]))),
                 ("m2/comments", FakeResponse(200, _page([{"id": "c2"}]))),
@@ -520,9 +507,9 @@ class TestInstagramFanOut:
 class TestInstagramAccountInsights:
     def test_the_request_plan_groups_every_metric_under_its_window(self) -> None:
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=FakeSession()):
-            client = InstagramClient("tok", "instagram", "v23.0", LOGGER)
+            client = InstagramClient("tok", "v23.0", LOGGER)
 
-        plan = _account_insight_plan(client, None, 0, 45 * 86400)
+        plan = _account_insight_plan(client, ACCOUNT_ID, 0, 45 * 86400)
 
         # 45 days is two windows; each carries the full metric set so the window's rows
         # can be emitted in date order.
@@ -558,11 +545,11 @@ class TestInstagramAccountInsights:
             batches = list(
                 get_rows(
                     access_token="tok",
-                    login_type="instagram",
                     api_version="v23.0",
                     endpoint="account_insights",
                     logger=LOGGER,
                     resumable_source_manager=FakeResumableSourceManager(),
+                    instagram_account_id=ACCOUNT_ID,
                     should_use_incremental_field=True,
                     db_incremental_field_last_value="2024-03-01",
                 )
@@ -601,7 +588,7 @@ class TestInstagramAccountInsights:
         rows = _collect(
             "account_insights",
             session,
-            instagram_account_id="17841",
+            instagram_account_id=ACCOUNT_ID,
             should_use_incremental_field=True,
             db_incremental_field_last_value="2024-03-01",
         )
@@ -611,7 +598,7 @@ class TestInstagramAccountInsights:
             ("2024-03-01T07:00:00+00:00", 5),
             ("2024-03-02T07:00:00+00:00", 7),
         ]
-        assert {row["instagram_account_id"] for row in reach_rows} == {"17841"}
+        assert {row["instagram_account_id"] for row in reach_rows} == {ACCOUNT_ID}
 
     def test_a_metric_meta_has_retired_is_dropped_without_failing_the_table(self) -> None:
         session = FakeSession(
@@ -659,7 +646,7 @@ class TestInstagramAccountInsights:
 
     def test_a_checkpoint_from_an_older_window_restarts_the_plan(self) -> None:
         session = FakeSession()
-        manager = FakeResumableSourceManager(InstagramResumeConfig(next_url="https://graph.instagram.com/stale"))
+        manager = FakeResumableSourceManager(InstagramResumeConfig(next_url="https://graph.facebook.com/stale"))
 
         _collect(
             "account_insights",
@@ -684,47 +671,92 @@ class TestInstagramAccountInsights:
         assert 0 < len(windows) <= max_windows
 
 
-class TestValidateCredentials:
-    def test_a_working_token_validates(self) -> None:
-        session = FakeSession([("me", FakeResponse(200, {"id": "17841", "username": "posthog"}))])
-        with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            assert validate_credentials("tok", "instagram", "v23.0", LOGGER) == (True, None)
+class TestProfessionalAccountListing:
+    def test_only_pages_with_a_linked_professional_account_are_offered(self) -> None:
+        session = FakeSession(
+            [
+                (
+                    "me/accounts",
+                    FakeResponse(
+                        200,
+                        _page(
+                            [
+                                {
+                                    "id": "page-1",
+                                    "name": "PostHog",
+                                    "instagram_business_account": {"id": ACCOUNT_ID, "username": "posthog"},
+                                },
+                                {"id": "page-2", "name": "A page with no Instagram account"},
+                            ]
+                        ),
+                    ),
+                )
+            ]
+        )
 
-    def test_facebook_login_without_an_account_id_is_rejected_before_any_request(self) -> None:
+        with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
+            accounts = list_professional_accounts("tok", "v23.0", LOGGER)
+
+        assert accounts == [{"id": ACCOUNT_ID, "username": "posthog", "name": None, "page_name": "PostHog"}]
+
+    def test_every_page_of_the_listing_is_walked(self) -> None:
+        def _page_row(page_id: str, account_id: str) -> dict[str, Any]:
+            return {"id": page_id, "name": page_id, "instagram_business_account": {"id": account_id}}
+
+        session = FakeSession(
+            [
+                ("me/accounts", FakeResponse(200, _page([_page_row("page-1", "1")], "CUR"))),
+                ("after=CUR", FakeResponse(200, _page([_page_row("page-2", "2")]))),
+            ]
+        )
+
+        with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
+            accounts = list_professional_accounts("tok", "v23.0", LOGGER)
+
+        assert [account["id"] for account in accounts] == ["1", "2"]
+
+
+class TestValidateCredentials:
+    def test_a_working_connection_validates(self) -> None:
+        session = FakeSession([(ACCOUNT_ID, FakeResponse(200, {"id": ACCOUNT_ID, "username": "posthog"}))])
+        with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
+            assert validate_credentials("tok", "v23.0", LOGGER, instagram_account_id=ACCOUNT_ID) == (True, None)
+
+    def test_no_chosen_account_is_rejected_before_any_request(self) -> None:
         session = FakeSession()
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            is_valid, message = validate_credentials("tok", "facebook", "v23.0", LOGGER)
+            is_valid, message = validate_credentials("tok", "v23.0", LOGGER)
 
         assert is_valid is False
-        assert message is not None and "Instagram account ID" in message
+        assert message is not None and "Choose the Instagram account" in message
         assert session.requested_urls == []
 
     @pytest.mark.parametrize(
         "status_code,code,expected_fragment",
         [
-            (400, 190, "invalid or has expired"),
-            (401, 0, "invalid or has expired"),
-            (403, 0, "missing the permissions"),
-            (400, 10, "missing the permissions"),
+            (400, 190, "has expired"),
+            (401, 0, "has expired"),
+            (403, 0, "missing permissions"),
+            (400, 10, "missing permissions"),
         ],
     )
     def test_auth_and_scope_failures_get_actionable_messages(
         self, status_code: int, code: int, expected_fragment: str
     ) -> None:
-        session = FakeSession([("me", FakeResponse(status_code, {"error": {"code": code, "message": "nope"}}))])
+        session = FakeSession([(ACCOUNT_ID, FakeResponse(status_code, {"error": {"code": code, "message": "nope"}}))])
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            is_valid, message = validate_credentials("tok", "instagram", "v23.0", LOGGER)
+            is_valid, message = validate_credentials("tok", "v23.0", LOGGER, instagram_account_id=ACCOUNT_ID)
 
         assert is_valid is False
         assert message is not None and expected_fragment in message
 
     def test_a_node_without_an_id_is_not_a_professional_account(self) -> None:
-        session = FakeSession([("me", FakeResponse(200, {}))])
+        session = FakeSession([(ACCOUNT_ID, FakeResponse(200, {}))])
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            is_valid, message = validate_credentials("tok", "instagram", "v23.0", LOGGER)
+            is_valid, message = validate_credentials("tok", "v23.0", LOGGER, instagram_account_id=ACCOUNT_ID)
 
         assert is_valid is False
-        assert message is not None and "professional Instagram account" in message
+        assert message is not None and "professional account" in message
 
     @pytest.mark.parametrize("account_id", ["17841/../me", "me?fields=id", "17841 or 1", "abc"])
     def test_a_non_numeric_account_id_is_rejected_before_any_request(self, account_id: str) -> None:
@@ -732,12 +764,10 @@ class TestValidateCredentials:
         # retarget the request or inject path/query segments.
         session = FakeSession()
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
-            is_valid, message = validate_credentials(
-                "tok", "instagram", "v23.0", LOGGER, instagram_account_id=account_id
-            )
+            is_valid, message = validate_credentials("tok", "v23.0", LOGGER, instagram_account_id=account_id)
 
         assert is_valid is False
-        assert message is not None and "must be numeric" in message
+        assert message is not None and "not a valid Instagram account" in message
         assert session.requested_urls == []
 
 
@@ -749,11 +779,11 @@ class TestInstagramSourceResponse:
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=FakeSession()):
             response = instagram_source(
                 access_token="tok",
-                login_type="instagram",
                 api_version="v23.0",
                 endpoint=endpoint,
                 logger=LOGGER,
                 resumable_source_manager=FakeResumableSourceManager(),
+                instagram_account_id=ACCOUNT_ID,
             )
 
         assert response.name == endpoint
@@ -766,11 +796,11 @@ class TestInstagramSourceResponse:
         with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
             response = instagram_source(
                 access_token="tok",
-                login_type="instagram",
                 api_version="v23.0",
                 endpoint="media",
                 logger=LOGGER,
                 resumable_source_manager=FakeResumableSourceManager(),
+                instagram_account_id=ACCOUNT_ID,
             )
             assert session.requested_urls == []
             list(cast("Iterable[Any]", response.items()))

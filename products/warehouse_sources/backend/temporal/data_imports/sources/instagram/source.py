@@ -9,9 +9,11 @@ from posthog.schema import (
     SourceConfig,
     SourceFieldInputConfig,
     SourceFieldInputConfigType,
-    SourceFieldSelectConfig,
-    SourceFieldSelectConfigOption,
+    SourceFieldOauthAccountSelectConfig,
+    SourceFieldOauthConfig,
 )
+
+from posthog.models.integration import ERROR_TOKEN_REFRESH_FAILED, INSTAGRAM_OAUTH_SCOPE, InstagramIntegration
 
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.typings import (
     SourceInputs,
@@ -21,6 +23,11 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.bas
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.canonical_descriptions import (
     CanonicalDescriptions,
 )
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.integration_accounts import (
+    IntegrationAccount,
+    IntegrationAccountListingError,
+)
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.mixins import OAuthMixin
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.registry import SourceRegistry
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import (
@@ -33,8 +40,12 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_
 from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.instagram import (
     AUTH_ERROR_PREFIX,
     PERMISSION_ERROR_PREFIX,
+    InstagramAPIError,
+    InstagramAuthError,
+    InstagramPermissionError,
     InstagramResumeConfig,
     instagram_source,
+    list_professional_accounts,
     validate_credentials as validate_instagram_credentials,
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.instagram.settings import (
@@ -47,7 +58,7 @@ logger = structlog.get_logger(__name__)
 
 
 @SourceRegistry.register
-class InstagramSource(ResumableSource[InstagramSourceConfig, InstagramResumeConfig]):
+class InstagramSource(ResumableSource[InstagramSourceConfig, InstagramResumeConfig], OAuthMixin):
     api_docs_url = "https://developers.facebook.com/docs/instagram-platform"
     # Meta pins the Graph API by URL path segment and keeps each version alive for
     # roughly two years, so the pin is a real choice rather than a constant.
@@ -55,13 +66,6 @@ class InstagramSource(ResumableSource[InstagramSourceConfig, InstagramResumeConf
     default_version = "v23.0"
 
     lists_tables_without_credentials = True
-
-    @property
-    def connection_host_fields(self) -> list[str]:
-        # Both decide where the stored token is sent: `login_type` picks the Graph host and
-        # `instagram_account_id` is spliced into the request path. Changing either while
-        # reusing a preserved token could retarget it, so both force credential re-entry.
-        return ["login_type", "instagram_account_id"]
 
     @property
     def source_type(self) -> ExternalDataSourceType:
@@ -75,11 +79,7 @@ class InstagramSource(ResumableSource[InstagramSourceConfig, InstagramResumeConf
             label="Instagram",
             caption="""Pull posts, stories, comments and insights from an Instagram professional (Business or Creator) account into the PostHog Data warehouse.
 
-Create a Meta app, then generate a **long-lived access token** for the account you want to sync. Which login you use decides the rest:
-- **Instagram Login** — the token comes from Instagram directly. Leave the account ID blank to sync the token's own account.
-- **Facebook Login** — the token comes from the Facebook Page linked to the Instagram account, so you also need the Instagram account ID.
-
-Grant `instagram_basic` and `instagram_manage_insights` (plus `pages_show_list` and `pages_read_engagement` for Facebook Login), or the insights tables stay empty. Fill in **App secret** only if your Meta app requires a proof of the app secret on API calls. Long-lived tokens expire after 60 days, so refresh yours and update this connection before then.""",
+Connect your Instagram account, then pick the professional account you want to sync. The account has to be linked to a Facebook page, and you'll be asked to grant access to that page along with Instagram insights and comments.""",
             iconPath="/static/services/instagram.png",
             docsUrl="https://posthog.com/docs/cdp/sources/instagram",
             keywords=["ig", "meta", "social"],
@@ -87,39 +87,19 @@ Grant `instagram_basic` and `instagram_manage_insights` (plus `pages_show_list` 
             fields=cast(
                 list[FieldType],
                 [
-                    SourceFieldSelectConfig(
-                        name="login_type",
-                        label="Login type",
+                    SourceFieldOauthConfig(
+                        name="instagram_integration_id",
+                        label="Instagram account",
                         required=True,
-                        defaultValue="instagram",
-                        options=[
-                            SourceFieldSelectConfigOption(label="Instagram Login", value="instagram"),
-                            SourceFieldSelectConfigOption(label="Facebook Login", value="facebook"),
-                        ],
+                        kind="instagram",
+                        requiredScopes=INSTAGRAM_OAUTH_SCOPE,
                     ),
-                    SourceFieldInputConfig(
-                        name="access_token",
-                        label="Access token",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="",
-                        secret=True,
-                    ),
-                    SourceFieldInputConfig(
+                    SourceFieldOauthAccountSelectConfig(
                         name="instagram_account_id",
-                        label="Instagram account ID",
-                        type=SourceFieldInputConfigType.TEXT,
-                        required=False,
-                        placeholder="17841400000000000",
-                        secret=False,
-                    ),
-                    SourceFieldInputConfig(
-                        name="app_secret",
-                        label="App secret",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=False,
-                        placeholder="",
-                        secret=True,
+                        label="Instagram professional account",
+                        integrationField="instagram_integration_id",
+                        integrationKind="instagram",
+                        required=True,
                     ),
                     SourceFieldInputConfig(
                         name="start_date",
@@ -136,12 +116,20 @@ Grant `instagram_basic` and `instagram_manage_insights` (plus `pages_show_list` 
     def get_non_retryable_errors(self) -> dict[str, str | None]:
         return {
             AUTH_ERROR_PREFIX: (
-                "Your Instagram access token is invalid or has expired. Long-lived tokens last 60 days — "
-                "generate a new one and reconnect."
+                "The Instagram connection has expired. Reconnect your Instagram account to keep syncing."
             ),
             PERMISSION_ERROR_PREFIX: (
-                "Your Instagram access token is missing the permissions this sync needs. Grant "
-                "instagram_basic and instagram_manage_insights, then reconnect."
+                "The Instagram connection is missing permissions this sync needs. Reconnect it and grant "
+                "access to your page, Instagram insights and comments."
+            ),
+            "Failed to refresh the Instagram connection": (
+                "The Instagram connection could not be refreshed. Reconnect your Instagram account."
+            ),
+            # The source still points at an `instagram_integration_id` whose Integration row is gone
+            # (deleted or de-authorized), which `get_oauth_integration` reports as a ValueError.
+            # Retrying can't bring the row back; only reconnecting can.
+            "Integration not found": (
+                "The Instagram connection for this source no longer exists. Reconnect your Instagram account."
             ),
         }
 
@@ -163,6 +151,58 @@ Grant `instagram_basic` and `instagram_manage_insights` (plus `pages_show_list` 
     ) -> list[SourceSchema]:
         return build_endpoint_schemas(ENDPOINTS, INCREMENTAL_FIELDS, names)
 
+    def _access_token(self, integration_id: int, team_id: int) -> str:
+        """An access token Meta will still accept.
+
+        Meta issues no refresh token, so a long-lived token is swapped for a fresh one on use.
+        `refresh_access_token` is a no-op while the current token has more than 7 days left.
+        """
+        integration = self.get_oauth_integration(integration_id, team_id)
+        InstagramIntegration(integration).refresh_access_token()
+
+        if integration.errors == ERROR_TOKEN_REFRESH_FAILED or not integration.access_token:
+            raise ValueError("Failed to refresh the Instagram connection")
+
+        return integration.access_token
+
+    def get_oauth_accounts(
+        self, integration_id: int, team_id: int, search: str | None = None
+    ) -> list[IntegrationAccount]:
+        # A Facebook user's pages are few, so `search` is ignored here and the endpoint filters the list.
+        try:
+            access_token = self._access_token(integration_id, team_id)
+        except ValueError as e:
+            raise IntegrationAccountListingError(
+                "The linked Instagram connection could not be used. Please reconnect your Instagram account."
+            ) from e
+
+        try:
+            accounts = list_professional_accounts(
+                access_token=access_token,
+                api_version=self.default_version,
+                logger=logger,
+            )
+        except (InstagramAuthError, InstagramPermissionError) as e:
+            raise IntegrationAccountListingError(
+                "Instagram rejected this connection. Reconnect your Instagram account and grant access to "
+                "the page your professional account is linked to."
+            ) from e
+        except InstagramAPIError as e:
+            # Throttling or a Graph API blip. Neither is a bug, so surface it as something the user
+            # can retry rather than a 500 that pages us.
+            raise IntegrationAccountListingError(
+                "Instagram is having trouble responding right now. Please try again in a few minutes."
+            ) from e
+
+        return [
+            IntegrationAccount(
+                value=account["id"],
+                display_name=account.get("username") or account.get("name") or "Instagram account",
+                secondary_text=account.get("page_name"),
+            )
+            for account in accounts
+        ]
+
     def validate_credentials(
         self,
         config: InstagramSourceConfig,
@@ -170,13 +210,16 @@ Grant `instagram_basic` and `instagram_manage_insights` (plus `pages_show_list` 
         schema_name: Optional[str] = None,
         api_version: str | None = None,
     ) -> tuple[bool, str | None]:
+        try:
+            access_token = self._access_token(config.instagram_integration_id, team_id)
+        except ValueError:
+            return False, "Connect an Instagram account before syncing."
+
         return validate_instagram_credentials(
-            access_token=config.access_token,
-            login_type=config.login_type,
+            access_token=access_token,
             api_version=self.resolve_api_version(api_version),
             logger=logger,
             instagram_account_id=config.instagram_account_id,
-            app_secret=config.app_secret,
         )
 
     def get_resumable_source_manager(self, inputs: SourceInputs) -> ResumableSourceManager[InstagramResumeConfig]:
@@ -193,14 +236,12 @@ Grant `instagram_basic` and `instagram_manage_insights` (plus `pages_show_list` 
         inputs: SourceInputs,
     ) -> SourceResponse:
         return instagram_source(
-            access_token=config.access_token,
-            login_type=config.login_type,
+            access_token=self._access_token(config.instagram_integration_id, inputs.team_id),
             api_version=self.resolve_api_version(inputs.api_version),
             endpoint=inputs.schema_name,
             logger=inputs.logger,
             resumable_source_manager=resumable_source_manager,
             instagram_account_id=config.instagram_account_id,
-            app_secret=config.app_secret,
             start_date=config.start_date,
             should_use_incremental_field=inputs.should_use_incremental_field,
             db_incremental_field_last_value=inputs.db_incremental_field_last_value
