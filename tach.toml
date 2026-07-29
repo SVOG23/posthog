@@ -741,6 +741,7 @@ from = [
 
 [[interfaces]]
 expose = [
+    "backend\\.artifacts.*",
     "backend\\.tasks.*",
 ]
 from = [
