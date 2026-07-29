@@ -4,14 +4,22 @@ from products.warehouse_sources.backend.types import IncrementalField, Increment
 
 # The YouTube Analytics API is a single global host; `reports.query` is the only endpoint we call.
 YOUTUBE_ANALYTICS_HOST = "https://youtubeanalytics.googleapis.com"
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-# The scope a refresh token must carry for the reports below. `yt-analytics-monetary.readonly`
-# is deliberately not needed: none of these reports ask for revenue metrics.
-REQUIRED_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
+# The YouTube Data API, used only to list the channels the connected account owns.
+YOUTUBE_DATA_HOST = "https://www.googleapis.com/youtube/v3"
+
+# Scopes the connected Google account must grant. `yt-analytics-monetary.readonly` is deliberately
+# not among them: channel reports carry no revenue metrics, so it would grant nothing we read.
+ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
+YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+REQUIRED_SCOPES = f"{ANALYTICS_SCOPE} {YOUTUBE_READONLY_SCOPE}"
 
 # `reports.query` caps a response at 200 rows and pages with a 1-based `startIndex`.
 MAX_RESULTS_PER_PAGE = 200
+
+# `channels.list?mine=true` returns only the channels the connected account owns, which is one for
+# an ordinary Google account, so the API's page maximum covers the list without paging.
+MAX_CHANNELS_PER_PAGE = 50
 
 # YouTube keeps revising the most recent days for a while, and the current day is always
 # partial, so the sync stops short of today and re-reads a trailing window every run.

@@ -1,5 +1,5 @@
 import dataclasses
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -15,16 +15,20 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.youtube_an
     DAY_DIMENSION_WINDOW_DAYS,
     DAY_FIELD,
     DEFAULT_LOOKBACK_DAYS,
-    GOOGLE_TOKEN_URL,
+    MAX_CHANNELS_PER_PAGE,
     MAX_RESULTS_PER_PAGE,
     MIN_START_DATE,
     YOUTUBE_ANALYTICS_HOST,
     YOUTUBE_ANALYTICS_REPORTS,
+    YOUTUBE_DATA_HOST,
     YouTubeAnalyticsReportConfig,
 )
 
 REQUEST_TIMEOUT_SECONDS = 120
 DEFAULT_API_VERSION = "v2"
+
+# Called to mint a fresh access token when the current one is rejected mid-sync.
+AccessTokenRefresher = Callable[[], str]
 
 
 @dataclasses.dataclass
@@ -34,7 +38,7 @@ class YouTubeAnalyticsResumeConfig:
 
 
 class YouTubeAnalyticsAuthError(Exception):
-    """The OAuth client credentials or refresh token were rejected by Google."""
+    """The connected Google account's credentials were rejected or could not be refreshed."""
 
 
 def channel_ids_param(channel_id: str | None) -> str:
@@ -66,57 +70,25 @@ def rows_from_result(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class YouTubeAnalyticsClient:
-    """Mints a short-lived Google access token from the customer's refresh token and queries reports."""
+    """Queries `reports.query` with the connected Google account's access token."""
 
     def __init__(
         self,
-        client_id: str,
-        client_secret: str,
-        refresh_token: str,
+        access_token: str,
+        refresh_access_token: AccessTokenRefresher | None = None,
         api_version: str = DEFAULT_API_VERSION,
         logger: FilteringBoundLogger | None = None,
     ) -> None:
-        self._client_id = client_id
-        self._client_secret = client_secret
-        self._refresh_token = refresh_token
+        self._token = access_token
+        self._refresh_access_token = refresh_access_token
         self._api_version = api_version
         self._logger = logger
-        self._token: str | None = None
-        redact = (client_secret, refresh_token)
-        self._session = make_tracked_session(redact_values=redact)
-        # The token exchange posts the client secret and refresh token in the body, which the
-        # name-based sample scrubbers can't recognise — keep that request out of capture.
-        self._token_session = make_tracked_session(redact_values=redact, capture=False)
+        # The token rides the `Authorization` header, which the tracked transport already scrubs.
+        self._session = make_tracked_session()
 
     @property
     def reports_url(self) -> str:
         return f"{YOUTUBE_ANALYTICS_HOST}/{self._api_version}/reports"
-
-    def mint_token(self) -> str:
-        response = self._token_session.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": self._refresh_token,
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        if response.status_code in (400, 401):
-            raise YouTubeAnalyticsAuthError(
-                "Google rejected the OAuth credentials. Check the client ID, client secret and refresh token."
-            )
-        response.raise_for_status()
-        token = response.json().get("access_token")
-        if not token:
-            raise YouTubeAnalyticsAuthError("Google returned no access token for the supplied refresh token.")
-        self._token = token
-        return token
-
-    @property
-    def token(self) -> str:
-        return self._token or self.mint_token()
 
     def query(self, params: dict[str, str]) -> dict[str, Any]:
         url = f"{self.reports_url}?{urlencode(params)}"
@@ -124,10 +96,11 @@ class YouTubeAnalyticsClient:
         def _get(token: str) -> requests.Response:
             return self._session.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=REQUEST_TIMEOUT_SECONDS)
 
-        response = _get(self.token)
-        # Access tokens last ~1h; a long backfill can outlive one, so re-mint once on 401.
-        if response.status_code == 401:
-            response = _get(self.mint_token())
+        response = _get(self._token)
+        # Google access tokens last ~1h; a long backfill can outlive one, so refresh once on 401.
+        if response.status_code == 401 and self._refresh_access_token is not None:
+            self._token = self._refresh_access_token()
+            response = _get(self._token)
 
         if not response.ok:
             if self._logger is not None:
@@ -158,10 +131,21 @@ def validate_start_date(start_date: str | None) -> tuple[bool, Optional[str]]:
     return True, None
 
 
+def list_channels(access_token: str) -> list[dict[str, Any]]:
+    """Channels the connected Google account owns, so the user picks one instead of hunting for its ID."""
+    session = make_tracked_session()
+    params = {"part": "snippet", "mine": "true", "maxResults": str(MAX_CHANNELS_PER_PAGE)}
+    response = session.get(
+        f"{YOUTUBE_DATA_HOST}/channels?{urlencode(params)}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json().get("items") or []
+
+
 def validate_credentials(
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token: str,
     channel_id: str | None = None,
     start_date: str | None = None,
     api_version: str = DEFAULT_API_VERSION,
@@ -170,13 +154,7 @@ def validate_credentials(
     if not ok:
         return False, message
 
-    client = YouTubeAnalyticsClient(client_id, client_secret, refresh_token, api_version=api_version)
-    try:
-        client.mint_token()
-    except YouTubeAnalyticsAuthError as e:
-        return False, str(e)
-    except Exception as e:
-        return False, f"Could not reach Google to exchange the refresh token ({e}). Please retry."
+    client = YouTubeAnalyticsClient(access_token, api_version=api_version)
 
     yesterday = (datetime.now(UTC) - timedelta(days=DATA_LATENCY_DAYS)).date()
     try:
@@ -191,14 +169,16 @@ def validate_credentials(
         )
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else None
+        if status == 401:
+            return False, "Google rejected the connected account's credentials. Please reconnect the integration."
         if status == 403:
             return (
                 False,
-                "The Google account has no access to this channel's analytics. Re-authorize with the "
-                "yt-analytics.readonly scope using an account that manages the channel.",
+                "The connected Google account cannot read this channel's analytics. Reconnect using an "
+                "account that manages the channel, and grant the YouTube Analytics permission.",
             )
         if status == 400:
-            return False, "YouTube rejected the channel ID. Leave it blank to use the authorized channel."
+            return False, "YouTube rejected the channel. Pick a channel the connected account owns."
         return False, f"Unexpected response from the YouTube Analytics API (status {status})."
     except Exception as e:
         return False, f"Could not reach the YouTube Analytics API ({e}). Please retry."
@@ -269,9 +249,8 @@ def _fetch_window(
 
 
 def get_rows(
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token: str,
+    refresh_access_token: AccessTokenRefresher | None,
     channel_id: str | None,
     start_date: str | None,
     endpoint: str,
@@ -282,7 +261,9 @@ def get_rows(
     db_incremental_field_last_value: Any,
 ) -> Iterator[list[dict[str, Any]]]:
     report = YOUTUBE_ANALYTICS_REPORTS[endpoint]
-    client = YouTubeAnalyticsClient(client_id, client_secret, refresh_token, api_version=api_version, logger=logger)
+    client = YouTubeAnalyticsClient(
+        access_token, refresh_access_token=refresh_access_token, api_version=api_version, logger=logger
+    )
     ids = channel_ids_param(channel_id)
 
     today = datetime.now(UTC).date()
@@ -317,9 +298,8 @@ def get_rows(
 
 
 def youtube_analytics_source(
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
+    access_token: str,
+    refresh_access_token: AccessTokenRefresher | None,
     channel_id: str | None,
     start_date: str | None,
     endpoint: str,
@@ -334,9 +314,8 @@ def youtube_analytics_source(
     return SourceResponse(
         name=endpoint,
         items=lambda: get_rows(
-            client_id=client_id,
-            client_secret=client_secret,
-            refresh_token=refresh_token,
+            access_token=access_token,
+            refresh_access_token=refresh_access_token,
             channel_id=channel_id,
             start_date=start_date,
             endpoint=endpoint,

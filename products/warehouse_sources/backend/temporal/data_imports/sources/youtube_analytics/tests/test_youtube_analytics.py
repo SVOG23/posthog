@@ -18,12 +18,12 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.youtube_an
     TOP_VIDEOS,
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.youtube_analytics.youtube_analytics import (
-    YouTubeAnalyticsAuthError,
     YouTubeAnalyticsClient,
     YouTubeAnalyticsResumeConfig,
     channel_ids_param,
     coerce_day,
     get_rows,
+    list_channels,
     resolve_start_day,
     rows_from_result,
     validate_credentials,
@@ -85,9 +85,8 @@ def _run_get_rows(
         return query_results[min(len(sent) - 1, len(query_results) - 1)]
 
     kwargs: dict[str, Any] = {
-        "client_id": "client-id",
-        "client_secret": "client-secret",
-        "refresh_token": "refresh-token",
+        "access_token": "access-token",
+        "refresh_access_token": None,
         "channel_id": None,
         "start_date": None,
         "endpoint": endpoint,
@@ -156,70 +155,82 @@ class TestRowsFromResult:
 
 
 class TestYouTubeAnalyticsClient:
-    def _client(self, session: mock.MagicMock, token_session: mock.MagicMock) -> YouTubeAnalyticsClient:
-        with mock.patch(f"{MODULE}.make_tracked_session", side_effect=[session, token_session]):
-            return YouTubeAnalyticsClient("client-id", "client-secret", "refresh-token", logger=mock.MagicMock())
+    def _client(self, session: mock.MagicMock, **kwargs: Any) -> YouTubeAnalyticsClient:
+        with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
+            return YouTubeAnalyticsClient("tok-1", logger=mock.MagicMock(), **kwargs)
 
-    def test_mints_token_once_and_reuses_it(self) -> None:
-        session, token_session = mock.MagicMock(), mock.MagicMock()
-        token_session.post.return_value = _response(json_body={"access_token": "tok-1"})
+    def test_requests_are_bearer_authorized_with_the_integration_token(self) -> None:
+        session = mock.MagicMock()
         session.get.return_value = _response(json_body=_result(["views"], [[1]]))
-        client = self._client(session, token_session)
 
-        client.query({"ids": "channel==MINE"})
-        client.query({"ids": "channel==MINE"})
+        self._client(session).query({"ids": "channel==MINE"})
 
-        assert token_session.post.call_count == 1
         assert session.get.call_args.kwargs["headers"] == {"Authorization": "Bearer tok-1"}
 
-    @parameterized.expand([("bad_request", 400), ("unauthorized", 401)])
-    def test_rejected_refresh_token_raises_auth_error(self, _name: str, status: int) -> None:
-        session, token_session = mock.MagicMock(), mock.MagicMock()
-        token_session.post.return_value = _response(status=status, json_body={"error": "invalid_grant"})
-        client = self._client(session, token_session)
-
-        with pytest.raises(YouTubeAnalyticsAuthError):
-            client.mint_token()
-
-    def test_missing_access_token_raises_auth_error(self) -> None:
-        session, token_session = mock.MagicMock(), mock.MagicMock()
-        token_session.post.return_value = _response(json_body={"expires_in": 3600})
-        client = self._client(session, token_session)
-
-        with pytest.raises(YouTubeAnalyticsAuthError):
-            client.mint_token()
-
-    def test_expired_access_token_is_reminted_once(self) -> None:
-        session, token_session = mock.MagicMock(), mock.MagicMock()
-        token_session.post.side_effect = [
-            _response(json_body={"access_token": "tok-1"}),
-            _response(json_body={"access_token": "tok-2"}),
-        ]
+    def test_rejected_token_is_refreshed_once_and_the_request_retried(self) -> None:
+        # A backfill can outlive Google's ~1h access token, so a mid-sync 401 must not fail the job.
+        session = mock.MagicMock()
         session.get.side_effect = [_response(status=401), _response(json_body=_result(["views"], [[7]]))]
-        client = self._client(session, token_session)
+        refresh = mock.MagicMock(return_value="tok-2")
 
-        body = client.query({"ids": "channel==MINE"})
+        body = self._client(session, refresh_access_token=refresh).query({"ids": "channel==MINE"})
 
         assert rows_from_result(body) == [{"views": 7}]
-        assert token_session.post.call_count == 2
+        assert refresh.call_count == 1
         assert session.get.call_args.kwargs["headers"] == {"Authorization": "Bearer tok-2"}
+
+    def test_a_second_rejection_is_raised_rather_than_refreshed_again(self) -> None:
+        session = mock.MagicMock()
+        session.get.side_effect = [_response(status=401), _response(status=401)]
+        refresh = mock.MagicMock(return_value="tok-2")
+
+        with pytest.raises(requests.HTTPError):
+            self._client(session, refresh_access_token=refresh).query({"ids": "channel==MINE"})
+
+        assert refresh.call_count == 1
+
+    def test_rejected_token_without_a_refresher_raises(self) -> None:
+        session = mock.MagicMock()
+        session.get.return_value = _response(status=401)
+
+        with pytest.raises(requests.HTTPError):
+            self._client(session).query({"ids": "channel==MINE"})
 
     @parameterized.expand([("forbidden", 403), ("bad_request", 400), ("server_error", 500)])
     def test_failed_report_request_raises(self, _name: str, status: int) -> None:
-        session, token_session = mock.MagicMock(), mock.MagicMock()
-        token_session.post.return_value = _response(json_body={"access_token": "tok-1"})
+        session = mock.MagicMock()
         session.get.return_value = _response(status=status, text="nope")
-        client = self._client(session, token_session)
 
         with pytest.raises(requests.HTTPError):
-            client.query({"ids": "channel==MINE"})
+            self._client(session).query({"ids": "channel==MINE"})
 
     def test_reports_url_uses_the_resolved_api_version(self) -> None:
-        session, token_session = mock.MagicMock(), mock.MagicMock()
-        with mock.patch(f"{MODULE}.make_tracked_session", side_effect=[session, token_session]):
-            client = YouTubeAnalyticsClient("id", "secret", "refresh", api_version="v3")
+        with mock.patch(f"{MODULE}.make_tracked_session"):
+            client = YouTubeAnalyticsClient("tok", api_version="v3")
 
         assert client.reports_url == "https://youtubeanalytics.googleapis.com/v3/reports"
+
+
+class TestListChannels:
+    def _call(self, body: Any) -> tuple[list[dict[str, Any]], mock.MagicMock]:
+        session = mock.MagicMock()
+        session.get.return_value = _response(json_body=body)
+        with mock.patch(f"{MODULE}.make_tracked_session", return_value=session):
+            return list_channels("tok"), session
+
+    def test_lists_only_the_connected_accounts_own_channels(self) -> None:
+        channels, session = self._call({"items": [{"id": "UC123", "snippet": {"title": "Acme"}}]})
+
+        url = session.get.call_args.args[0]
+        assert "mine=true" in url
+        assert "part=snippet" in url
+        assert channels == [{"id": "UC123", "snippet": {"title": "Acme"}}]
+
+    @parameterized.expand([("no_items", {}), ("null_items", {"items": None}), ("empty_items", {"items": []})])
+    def test_returns_empty_when_the_account_owns_no_channel(self, _name: str, body: Any) -> None:
+        channels, _ = self._call(body)
+
+        assert channels == []
 
 
 class TestResolveStartDay:
@@ -362,42 +373,35 @@ class TestGetRows:
 
 @freeze_time(FROZEN_NOW)
 class TestValidateCredentials:
-    def _patch_client(self, mint: Any, query: Any) -> Any:
+    def _patch_client(self, query: Any) -> Any:
         client = mock.MagicMock(spec=YouTubeAnalyticsClient)
-        client.mint_token.side_effect = mint
         client.query.side_effect = query
         return mock.patch(f"{MODULE}.YouTubeAnalyticsClient", return_value=client)
 
     def test_valid_credentials(self) -> None:
-        with self._patch_client(mint=None, query=[{"columnHeaders": [], "rows": []}]):
-            assert validate_credentials("id", "secret", "refresh") == (True, None)
-
-    def test_rejected_refresh_token_reports_the_auth_error(self) -> None:
-        with self._patch_client(mint=YouTubeAnalyticsAuthError("Google rejected the OAuth credentials."), query=None):
-            is_valid, error = validate_credentials("id", "secret", "refresh")
-
-        assert is_valid is False
-        assert error == "Google rejected the OAuth credentials."
+        with self._patch_client(query=[{"columnHeaders": [], "rows": []}]):
+            assert validate_credentials("access-token", "UC123") == (True, None)
 
     @parameterized.expand(
         [
-            ("forbidden", 403, "yt-analytics.readonly"),
-            ("bad_channel", 400, "channel ID"),
+            ("unauthorized", 401, "reconnect"),
+            ("forbidden", 403, "cannot read this channel"),
+            ("bad_channel", 400, "Pick a channel"),
             ("unexpected", 500, "status 500"),
         ]
     )
     def test_report_errors_map_to_actionable_messages(self, _name: str, status: int, fragment: str) -> None:
         error = requests.HTTPError("boom", response=_response(status=status))
 
-        with self._patch_client(mint=None, query=error):
-            is_valid, message = validate_credentials("id", "secret", "refresh")
+        with self._patch_client(query=error):
+            is_valid, message = validate_credentials("access-token", "UC123")
 
         assert is_valid is False
         assert message is not None and fragment in message
 
     def test_network_failure_is_reported_not_raised(self) -> None:
-        with self._patch_client(mint=None, query=requests.ConnectionError("no route")):
-            is_valid, message = validate_credentials("id", "secret", "refresh")
+        with self._patch_client(query=requests.ConnectionError("no route")):
+            is_valid, message = validate_credentials("access-token", "UC123")
 
         assert is_valid is False
         assert message is not None and "Could not reach" in message
@@ -412,8 +416,8 @@ class TestValidateCredentials:
     def test_out_of_range_start_date_is_rejected_before_any_request(
         self, _name: str, start_date: str, fragment: str
     ) -> None:
-        # A bad start date is caught before the token exchange, so no client is constructed.
-        is_valid, message = validate_credentials("id", "secret", "refresh", start_date=start_date)
+        # A bad start date is caught before any API call, so no request is made.
+        is_valid, message = validate_credentials("access-token", "UC123", start_date=start_date)
 
         assert is_valid is False
         assert message is not None and fragment in message
@@ -429,9 +433,8 @@ class TestYouTubeAnalyticsSourceResponse:
     )
     def test_primary_keys_are_unique_table_wide(self, endpoint: str, expected: list[str]) -> None:
         response = youtube_analytics_source(
-            client_id="id",
-            client_secret="secret",
-            refresh_token="refresh",
+            access_token="access-token",
+            refresh_access_token=None,
             channel_id=None,
             start_date=None,
             endpoint=endpoint,
@@ -445,9 +448,8 @@ class TestYouTubeAnalyticsSourceResponse:
 
     def test_partitions_and_sorts_on_the_day_column(self) -> None:
         response = youtube_analytics_source(
-            client_id="id",
-            client_secret="secret",
-            refresh_token="refresh",
+            access_token="access-token",
+            refresh_access_token=None,
             channel_id=None,
             start_date=None,
             endpoint=GEOGRAPHY,
@@ -466,9 +468,8 @@ class TestYouTubeAnalyticsSourceResponse:
     def test_items_is_lazy_until_iterated(self) -> None:
         manager = FakeResumeManager()
         response = youtube_analytics_source(
-            client_id="id",
-            client_secret="secret",
-            refresh_token="refresh",
+            access_token="access-token",
+            refresh_access_token=None,
             channel_id=None,
             start_date="2026-07-25",
             endpoint=GEOGRAPHY,

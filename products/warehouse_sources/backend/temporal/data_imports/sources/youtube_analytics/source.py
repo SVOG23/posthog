@@ -1,5 +1,7 @@
 from typing import Optional, cast
 
+import requests
+
 from posthog.schema import (
     DataWarehouseSourceCategory,
     ExternalDataSourceType as SchemaExternalDataSourceType,
@@ -7,7 +9,11 @@ from posthog.schema import (
     SourceConfig,
     SourceFieldInputConfig,
     SourceFieldInputConfigType,
+    SourceFieldOauthAccountSelectConfig,
+    SourceFieldOauthConfig,
 )
+
+from posthog.models.integration import ERROR_TOKEN_REFRESH_FAILED, OauthIntegration
 
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline.typings import (
     SourceInputs,
@@ -17,6 +23,11 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.bas
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.canonical_descriptions import (
     CanonicalDescriptions,
 )
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.integration_accounts import (
+    IntegrationAccount,
+    IntegrationAccountListingError,
+)
+from products.warehouse_sources.backend.temporal.data_imports.sources.common.mixins import OAuthMixin
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.registry import SourceRegistry
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import SourceSchema
@@ -25,20 +36,26 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.youtube_analytics.settings import (
     DAY_INCREMENTAL_FIELDS,
-    REQUIRED_SCOPE,
+    REQUIRED_SCOPES,
     REVISION_LOOKBACK_SECONDS,
     YOUTUBE_ANALYTICS_REPORTS,
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.youtube_analytics.youtube_analytics import (
+    YouTubeAnalyticsAuthError,
     YouTubeAnalyticsResumeConfig,
+    list_channels,
     validate_credentials as validate_youtube_analytics_credentials,
     youtube_analytics_source,
 )
 from products.warehouse_sources.backend.types import ExternalDataSourceType
 
+RECONNECT_MESSAGE = (
+    "Could not use the credentials for this YouTube Analytics connection. Please reconnect the Google account."
+)
+
 
 @SourceRegistry.register
-class YouTubeAnalyticsSource(ResumableSource[YouTubeAnalyticsSourceConfig, YouTubeAnalyticsResumeConfig]):
+class YouTubeAnalyticsSource(ResumableSource[YouTubeAnalyticsSourceConfig, YouTubeAnalyticsResumeConfig], OAuthMixin):
     api_docs_url = "https://developers.google.com/youtube/analytics/reference/reports/query"
     supported_versions = ("v2",)
     default_version = "v2"
@@ -50,27 +67,96 @@ class YouTubeAnalyticsSource(ResumableSource[YouTubeAnalyticsSourceConfig, YouTu
         return ExternalDataSourceType.YOUTUBEANALYTICS
 
     def get_non_retryable_errors(self) -> dict[str, str | None]:
-        credentials_message = (
-            "Google rejected the OAuth credentials. Check the client ID, client secret and refresh token, "
-            "then reconnect."
-        )
         return {
-            "Google rejected the OAuth credentials": credentials_message,
-            "Google returned no access token": credentials_message,
-            "400 Client Error: Bad Request for url: https://oauth2.googleapis.com/token": credentials_message,
-            "401 Client Error: Unauthorized for url: https://oauth2.googleapis.com/token": credentials_message,
-            "403 Client Error: Forbidden for url: https://youtubeanalytics.googleapis.com": (
-                "The Google account has no access to this channel's analytics. Re-authorize with the "
-                "yt-analytics.readonly scope using an account that manages the channel."
+            "401 Client Error": (
+                "Google rejected the credentials for this connection. Please reconnect the Google account."
             ),
+            "403 Client Error: Forbidden for url: https://youtubeanalytics.googleapis.com": (
+                "The connected Google account cannot read this channel's analytics. Reconnect using an "
+                "account that manages the channel, and grant the YouTube Analytics permission."
+            ),
+            "Integration not found": (
+                "The Google account for this source is no longer connected. Please reconnect it."
+            ),
+            # Already the actionable message, so keep it rather than substituting another.
+            RECONNECT_MESSAGE: None,
         }
 
     def get_canonical_descriptions(self) -> CanonicalDescriptions:
-        from products.warehouse_sources.backend.temporal.data_imports.sources.youtube_analytics.canonical_descriptions import (
+        from products.warehouse_sources.backend.temporal.data_imports.sources.youtube_analytics.canonical_descriptions import (  # noqa: PLC0415
             CANONICAL_DESCRIPTIONS,
         )
 
         return CANONICAL_DESCRIPTIONS
+
+    def access_token(self, integration_id: int, team_id: int, force_refresh: bool = False) -> str:
+        """A currently valid Google access token for the linked account.
+
+        `force_refresh` re-mints unconditionally, for the mid-sync case where a token that looked
+        fresh has already been rejected.
+        """
+        integration = self.get_oauth_integration(integration_id, team_id)
+
+        oauth = OauthIntegration(integration)
+        if force_refresh or oauth.access_token_expired():
+            oauth.refresh_access_token()
+            if integration.errors == ERROR_TOKEN_REFRESH_FAILED:
+                raise YouTubeAnalyticsAuthError(RECONNECT_MESSAGE)
+
+        if not integration.access_token:
+            raise YouTubeAnalyticsAuthError(RECONNECT_MESSAGE)
+
+        return integration.access_token
+
+    def get_oauth_accounts(
+        self, integration_id: int, team_id: int, search: str | None = None
+    ) -> list[IntegrationAccount]:
+        # A Google account owns a handful of channels at most, so `search` is ignored here and the
+        # endpoint filters the returned list.
+        try:
+            access_token = self.access_token(integration_id, team_id)
+        except ValueError as e:
+            raise IntegrationAccountListingError(
+                "The Google account for this source is no longer connected. Please reconnect it."
+            ) from e
+        except YouTubeAnalyticsAuthError as e:
+            raise IntegrationAccountListingError(str(e)) from e
+        except requests.RequestException as e:
+            # `refresh_access_token` only records the failure on the integration when Google answers
+            # with a parseable body; a network error or an HTML error page escapes instead.
+            raise IntegrationAccountListingError(
+                "Could not reach Google to refresh this connection. Please try again in a few minutes."
+            ) from e
+
+        try:
+            channels = list_channels(access_token)
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status in (401, 403):
+                raise IntegrationAccountListingError(
+                    "Google rejected the credentials for this connection. Please reconnect the Google account "
+                    "and grant access to your YouTube channel."
+                ) from e
+            if status == 429 or (status is not None and status >= 500):
+                raise IntegrationAccountListingError(
+                    "Google is having trouble responding right now. Please try again in a few minutes."
+                ) from e
+            # Any other status means we built a bad request, which the user cannot fix.
+            raise
+        except requests.RequestException as e:
+            raise IntegrationAccountListingError(
+                "Google is having trouble responding right now. Please try again in a few minutes."
+            ) from e
+
+        return [
+            IntegrationAccount(
+                value=channel["id"],
+                display_name=(channel.get("snippet") or {}).get("title") or channel["id"],
+                secondary_text=(channel.get("snippet") or {}).get("customUrl"),
+            )
+            for channel in channels
+            if channel.get("id")
+        ]
 
     def get_schemas(
         self,
@@ -108,10 +194,18 @@ class YouTubeAnalyticsSource(ResumableSource[YouTubeAnalyticsSourceConfig, YouTu
         schema_name: Optional[str] = None,
         api_version: str | None = None,
     ) -> tuple[bool, str | None]:
+        if not config.youtube_analytics_integration_id:
+            return False, "Connect a Google account to sync YouTube Analytics."
+
+        try:
+            access_token = self.access_token(config.youtube_analytics_integration_id, team_id)
+        except (ValueError, YouTubeAnalyticsAuthError) as e:
+            return False, str(e)
+        except requests.RequestException as e:
+            return False, f"Could not reach Google to refresh this connection ({e}). Please retry."
+
         return validate_youtube_analytics_credentials(
-            client_id=config.client_id,
-            client_secret=config.client_secret,
-            refresh_token=config.refresh_token,
+            access_token=access_token,
             channel_id=config.channel_id,
             start_date=config.start_date,
             api_version=self.resolve_api_version(api_version),
@@ -128,10 +222,12 @@ class YouTubeAnalyticsSource(ResumableSource[YouTubeAnalyticsSourceConfig, YouTu
         resumable_source_manager: ResumableSourceManager[YouTubeAnalyticsResumeConfig],
         inputs: SourceInputs,
     ) -> SourceResponse:
+        integration_id = config.youtube_analytics_integration_id
+        team_id = inputs.team_id
+
         return youtube_analytics_source(
-            client_id=config.client_id,
-            client_secret=config.client_secret,
-            refresh_token=config.refresh_token,
+            access_token=self.access_token(integration_id, team_id),
+            refresh_access_token=lambda: self.access_token(integration_id, team_id, force_refresh=True),
             channel_id=config.channel_id,
             start_date=config.start_date,
             endpoint=inputs.schema_name,
@@ -151,12 +247,10 @@ class YouTubeAnalyticsSource(ResumableSource[YouTubeAnalyticsSourceConfig, YouTu
             category=DataWarehouseSourceCategory.ANALYTICS,
             label="YouTube Analytics",
             caption=(
-                "Pull daily channel metrics — views, watch time, subscribers, traffic sources, geography and "
-                "demographics — from the YouTube Analytics API.\n\n"
-                "Create an OAuth client in the [Google Cloud console](https://console.cloud.google.com/apis/credentials) "
-                "with the YouTube Analytics API enabled, authorize it as the Google account that manages your channel, "
-                f"and grant the `{REQUIRED_SCOPE}` scope. Enter the client ID, client secret and the resulting "
-                "refresh token below."
+                "Pull daily channel metrics from the YouTube Analytics API: views, watch time, subscribers, "
+                "traffic sources, geography and demographics.\n\n"
+                "Connect the Google account that manages your channel, then pick the channel to sync. PostHog "
+                "asks for read-only access to your YouTube Analytics reports and your list of channels."
             ),
             docsUrl="https://posthog.com/docs/cdp/sources/youtube-analytics",
             iconPath="/static/services/youtube_analytics.png",
@@ -165,37 +259,20 @@ class YouTubeAnalyticsSource(ResumableSource[YouTubeAnalyticsSourceConfig, YouTu
             fields=cast(
                 list[FieldType],
                 [
-                    SourceFieldInputConfig(
-                        name="client_id",
-                        label="OAuth client ID",
-                        type=SourceFieldInputConfigType.TEXT,
+                    SourceFieldOauthConfig(
+                        name="youtube_analytics_integration_id",
+                        label="Google account",
                         required=True,
-                        placeholder="000000000000-xxxxxxxx.apps.googleusercontent.com",
-                        secret=False,
+                        kind="youtube-analytics",
+                        requiredScopes=REQUIRED_SCOPES,
                     ),
-                    SourceFieldInputConfig(
-                        name="client_secret",
-                        label="OAuth client secret",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="",
-                        secret=True,
-                    ),
-                    SourceFieldInputConfig(
-                        name="refresh_token",
-                        label="Refresh token",
-                        type=SourceFieldInputConfigType.PASSWORD,
-                        required=True,
-                        placeholder="",
-                        secret=True,
-                    ),
-                    SourceFieldInputConfig(
+                    SourceFieldOauthAccountSelectConfig(
                         name="channel_id",
-                        label="Channel ID",
-                        type=SourceFieldInputConfigType.TEXT,
-                        required=False,
-                        placeholder="Leave blank to use the authorized channel",
-                        secret=False,
+                        label="Channel",
+                        integrationField="youtube_analytics_integration_id",
+                        integrationKind="youtube-analytics",
+                        required=True,
+                        placeholder="Pick a channel the connected account owns",
                     ),
                     SourceFieldInputConfig(
                         name="start_date",
