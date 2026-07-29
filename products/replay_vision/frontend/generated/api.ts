@@ -25,6 +25,7 @@ import type {
     PaginatedReplayObservationListApi,
     PaginatedReplayScannerListApi,
     PaginatedReplayScannerPromptSuggestionListApi,
+    PaginatedReplayScannerTemplateListApi,
     PaginatedVisionActionListApi,
     PaginatedVisionActionRunListListApi,
     PatchedReplayScannerApi,
@@ -33,6 +34,7 @@ import type {
     ReplayObservationLabelApi,
     ReplayScannerApi,
     ReplayScannerPromptSuggestionApi,
+    ReplayScannerTemplateApi,
     RetryResponseApi,
     RunActionResponseApi,
     ScannerCreatorsResponseApi,
@@ -47,6 +49,7 @@ import type {
     VisionObservationsListParams,
     VisionObservationsRetrieveParams,
     VisionQuotaApi,
+    VisionScannerTemplatesListParams,
     VisionScannersImpactRetrieveParams,
     VisionScannersListParams,
     VisionScannersObservationsListParams,
@@ -406,6 +409,63 @@ export const environmentVisionQuotaRetrieve = async (
     })
 }
 
+export const getVisionScannerTemplatesListUrl = (projectId: string, params?: VisionScannerTemplatesListParams) => {
+    const normalizedParams = new URLSearchParams()
+
+    Object.entries(params || {}).forEach(([key, value]) => {
+        if (value !== undefined) {
+            normalizedParams.append(key, value === null ? 'null' : String(value))
+        }
+    })
+
+    const stringifiedParams = normalizedParams.toString()
+
+    return stringifiedParams.length > 0
+        ? `/api/projects/${projectId}/vision/scanner_templates/?${stringifiedParams}`
+        : `/api/projects/${projectId}/vision/scanner_templates/`
+}
+
+export const visionScannerTemplatesList = async (
+    projectId: string,
+    params?: VisionScannerTemplatesListParams,
+    options?: RequestInit
+): Promise<PaginatedReplayScannerTemplateListApi> => {
+    return apiMutator<PaginatedReplayScannerTemplateListApi>(getVisionScannerTemplatesListUrl(projectId, params), {
+        ...options,
+        method: 'GET',
+    })
+}
+
+export const getVisionScannerTemplatesRetrieveUrl = (projectId: string, id: string) => {
+    return `/api/projects/${projectId}/vision/scanner_templates/${id}/`
+}
+
+export const visionScannerTemplatesRetrieve = async (
+    projectId: string,
+    id: string,
+    options?: RequestInit
+): Promise<ReplayScannerTemplateApi> => {
+    return apiMutator<ReplayScannerTemplateApi>(getVisionScannerTemplatesRetrieveUrl(projectId, id), {
+        ...options,
+        method: 'GET',
+    })
+}
+
+export const getVisionScannerTemplatesDestroyUrl = (projectId: string, id: string) => {
+    return `/api/projects/${projectId}/vision/scanner_templates/${id}/`
+}
+
+export const visionScannerTemplatesDestroy = async (
+    projectId: string,
+    id: string,
+    options?: RequestInit
+): Promise<void> => {
+    return apiMutator<void>(getVisionScannerTemplatesDestroyUrl(projectId, id), {
+        ...options,
+        method: 'DELETE',
+    })
+}
+
 export const getVisionScannersListUrl = (projectId: string, params?: VisionScannersListParams) => {
     const normalizedParams = new URLSearchParams()
 
@@ -605,6 +665,24 @@ export const visionScannersObserveCreate = async (
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...options?.headers },
         body: JSON.stringify(observeRequestApi),
+    })
+}
+
+export const getVisionScannersSaveAsTemplateCreateUrl = (projectId: string, id: string) => {
+    return `/api/projects/${projectId}/vision/scanners/${id}/save_as_template/`
+}
+
+/**
+ * CRUD for Replay Vision scanners.
+ */
+export const visionScannersSaveAsTemplateCreate = async (
+    projectId: string,
+    id: string,
+    options?: RequestInit
+): Promise<ReplayScannerTemplateApi> => {
+    return apiMutator<ReplayScannerTemplateApi>(getVisionScannersSaveAsTemplateCreateUrl(projectId, id), {
+        ...options,
+        method: 'POST',
     })
 }
 

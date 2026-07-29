@@ -33,6 +33,7 @@ from products.replay_vision.backend.api.filters import (
     split_csv,
     validate_csv_choices,
 )
+from products.replay_vision.backend.api.scanner_templates import ReplayScannerTemplateSerializer
 from products.replay_vision.backend.api.trigger import (
     WorkflowStartOutcome,
     check_observation_quota,
@@ -64,6 +65,7 @@ from products.replay_vision.backend.models.replay_scanner import (
     ScannerProvider,
     ScannerType,
 )
+from products.replay_vision.backend.models.replay_scanner_template import ReplayScannerTemplate
 from products.replay_vision.backend.queries import (
     ESTIMATE_INTERACTIVE_MAX_EXECUTION_SECONDS,
     ESTIMATE_STALE_AFTER,
@@ -1039,7 +1041,15 @@ class ReplayScannerViewSet(TeamAndOrgViewSetMixin, AccessControlViewSetMixin, vi
     scope_object = "replay_scanner"
     # Custom actions must be listed explicitly or personal-API-key callers 403 silently.
     scope_object_read_actions = ["list", "retrieve", "creators", "stats"]
-    scope_object_write_actions = ["create", "update", "partial_update", "destroy", "observe", "bulk_observe"]
+    scope_object_write_actions = [
+        "create",
+        "update",
+        "partial_update",
+        "destroy",
+        "observe",
+        "bulk_observe",
+        "save_as_template",
+    ]
     permission_classes = [ReplayVisionEnabledPermission]
     serializer_class = ReplayScannerSerializer
     queryset = ReplayScanner.objects.all()
@@ -1048,7 +1058,7 @@ class ReplayScannerViewSet(TeamAndOrgViewSetMixin, AccessControlViewSetMixin, vi
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     # Same authorization as /observe/: configuring a scanner indirectly exposes recording contents.
-    _CONFIG_ACTIONS = {"create", "update", "partial_update"}
+    _CONFIG_ACTIONS = {"create", "update", "partial_update", "save_as_template"}
 
     def dangerously_get_required_scopes(self, request: Request, view: Any) -> list[str] | None:
         if self.action in self._CONFIG_ACTIONS:
@@ -1089,6 +1099,66 @@ class ReplayScannerViewSet(TeamAndOrgViewSetMixin, AccessControlViewSetMixin, vi
             properties,
             team=self.team,
             request=self.request,
+        )
+
+    @extend_schema(
+        request=None,
+        responses={200: ReplayScannerTemplateSerializer, 201: ReplayScannerTemplateSerializer},
+    )
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="save_as_template",
+        required_scopes=["replay_scanner:write", "session_recording:read"],
+    )
+    def save_as_template(self, request: Request, **kwargs: Any) -> Response:
+        scanner = self.get_object()
+        template_values = {
+            "name": scanner.name,
+            "description": scanner.description,
+            "scanner_type": scanner.scanner_type,
+            "scanner_config": scanner.scanner_config,
+            "query": scanner.query,
+            "sampling_rate": scanner.sampling_rate,
+            "sampling_mode": scanner.sampling_mode,
+            "provider": scanner.provider,
+            "model": scanner.model,
+            "emits_signals": scanner.emits_signals,
+        }
+        template = ReplayScannerTemplate.objects.filter(
+            team_id=self.team_id,
+            source_scanner=scanner,
+        ).first()
+        created = template is None
+        try:
+            if template is None:
+                template = ReplayScannerTemplate.objects.create(
+                    team=self.team,
+                    source_scanner=scanner,
+                    created_by=cast(User, request.user),
+                    **template_values,
+                )
+            else:
+                for field, value in template_values.items():
+                    setattr(template, field, value)
+                template.save(update_fields=[*template_values.keys(), "updated_at"])
+        except IntegrityError:
+            raise serializers.ValidationError({"name": "A saved scanner template with this name already exists."})
+
+        report_user_action(
+            cast(User, request.user),
+            "replay_vision_scanner_template_saved",
+            {
+                "scanner_id": str(scanner.id),
+                "template_id": str(template.id),
+                "created": created,
+            },
+            team=self.team,
+            request=request,
+        )
+        return Response(
+            ReplayScannerTemplateSerializer(template).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
     @extend_schema(responses={200: ScannerCreatorsResponseSerializer})

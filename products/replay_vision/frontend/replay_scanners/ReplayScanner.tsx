@@ -1,6 +1,6 @@
 import { useActions, useValues } from 'kea'
 
-import { IconSparkles } from '@posthog/icons'
+import { IconCopy, IconSparkles } from '@posthog/icons'
 import { LemonBanner, LemonButton, SpinnerOverlay } from '@posthog/lemon-ui'
 
 import { NotFound } from 'lib/components/NotFound'
@@ -31,6 +31,7 @@ import { ScannerRunTab } from './components/ScannerRunTab'
 import { VisionActionsTab } from './components/VisionActionsTab'
 import { replayScannerLogic } from './replayScannerLogic'
 import { ReplayScannerTab, replayScannerSceneLogic } from './replayScannerSceneLogic'
+import { scannerTemplatesLogic } from './scannerTemplatesLogic'
 
 export const scene: SceneExport = {
     component: ReplayScannerSceneComponent,
@@ -49,6 +50,8 @@ export function ReplayScannerSceneComponent(): JSX.Element {
     useAttachedLogic(scannerLogic, replayScannerSceneLogic)
 
     const { scanner, scannerLoading } = useValues(scannerLogic)
+    const { customTemplates, savingScannerIds } = useValues(scannerTemplatesLogic)
+    const { saveTemplate } = useActions(scannerTemplatesLogic)
 
     if (!featureFlags[FEATURE_FLAGS.REPLAY_VISION]) {
         // Flags load asynchronously, so wait for them before deciding the page doesn't exist.
@@ -66,6 +69,8 @@ export function ReplayScannerSceneComponent(): JSX.Element {
         )
     }
 
+    const hasSavedTemplate = customTemplates.some((template) => template.source_scanner === scannerId)
+
     return (
         <SceneContent>
             <SceneTitleSection
@@ -74,6 +79,17 @@ export function ReplayScannerSceneComponent(): JSX.Element {
                 resourceType={{ type: 'replay_vision' }}
                 actions={
                     <>
+                        <LemonButton
+                            type="secondary"
+                            size="small"
+                            icon={<IconCopy />}
+                            loading={savingScannerIds.includes(scannerId)}
+                            disabledReason={getReplayVisionEditDisabledReason(scanner.user_access_level)}
+                            onClick={() => saveTemplate(scannerId)}
+                            data-attr="vision-scanner-save-template"
+                        >
+                            {hasSavedTemplate ? 'Update template' : 'Save as template'}
+                        </LemonButton>
                         {activeTab !== ReplayScannerTab.Quality && (
                             <LemonButton
                                 type="secondary"
