@@ -19,8 +19,23 @@ from posthog.utils import relative_date_parse_with_delta_mapping
 APP_SOURCE_TO_PRODUCT_KEY: dict[str, ProductKey] = {
     "hog_function": ProductKey.PIPELINE_DESTINATIONS,
     "hog_flow": ProductKey.WORKFLOWS,
+    "hog_flow_version": ProductKey.WORKFLOWS,
     "batch_export": ProductKey.PIPELINE_BATCH_EXPORTS,
 }
+
+
+def versioned_app_source_id(app_source_id: str, version: int) -> str:
+    """Key for a version-scoped metric row.
+
+    Producers that know which version of their config emitted a metric write it twice: once under
+    their plain `app_source` (the version-agnostic series) and once under a sibling versioned source
+    with the version appended to the id. `app_metrics2` can't gain a version column — it's an
+    AggregatingMergeTree whose sort key is its aggregation key — so the version lives in the id.
+
+    Keep in sync with `versionedAppSourceId` in
+    nodejs/src/cdp/services/monitoring/hog-function-monitoring.service.ts.
+    """
+    return f"{app_source_id}/{version}"
 
 
 @dataclass
@@ -83,6 +98,15 @@ class AppMetricsRequestSerializer(serializers.Serializer):
         required=False,
         default="kind",
         help_text="Group the series by metric 'name' or 'kind'. Defaults to 'kind'.",
+    )
+    version = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        help_text=(
+            "Only count metrics produced by this version of the object's config, e.g. one published "
+            "version of a workflow. Omit to count every version. Supported where the producer records "
+            "the version it ran; otherwise this returns no data."
+        ),
     )
 
 
@@ -293,6 +317,17 @@ def fetch_app_metric_totals_by_source(
 
 class AppMetricsMixin(viewsets.GenericViewSet):
     app_source: str  # Should be set by the inheriting class
+    # Sibling `app_source` under which this object's producer mirrors version-scoped metric rows.
+    # Set it to opt the viewset into the `?version=` filter; leave it None when the producer doesn't
+    # record a version, so the filter fails loudly instead of silently returning an empty series.
+    versioned_app_source: Optional[str] = None
+
+    def _resolve_app_metrics_source(self, obj: Any, version: Optional[int]) -> tuple[str, str]:
+        if version is None:
+            return self.app_source, str(obj.id)
+        if not self.versioned_app_source:
+            raise ValidationError("Metrics for this object are not recorded per version.")
+        return self.versioned_app_source, versioned_app_source_id(str(obj.id), version)
 
     def get_app_metrics_instance_id(self) -> Optional[str]:
         """
@@ -327,11 +362,12 @@ class AppMetricsMixin(viewsets.GenericViewSet):
 
         after_date, _, _ = relative_date_parse_with_delta_mapping(params.get("after", "-7d"), team.timezone_info)
         before_date, _, _ = relative_date_parse_with_delta_mapping(params.get("before", "-0d"), team.timezone_info)
+        app_source, app_source_id = self._resolve_app_metrics_source(obj, params.get("version"))
 
         data = fetch_app_metrics_trends(
             team_id=self.team_id,  # type: ignore
-            app_source=self.app_source,
-            app_source_id=str(obj.id),
+            app_source=app_source,
+            app_source_id=app_source_id,
             # From request params
             instance_id=instance_id,
             interval=params.get("interval", "day"),
@@ -372,10 +408,12 @@ class AppMetricsMixin(viewsets.GenericViewSet):
         if params.get("before"):
             before_date, _, _ = relative_date_parse_with_delta_mapping(params["before"], team.timezone_info)
 
+        app_source, app_source_id = self._resolve_app_metrics_source(obj, params.get("version"))
+
         data = fetch_app_metric_totals(
             team_id=self.team_id,  # type: ignore
-            app_source=self.app_source,
-            app_source_id=str(obj.id),
+            app_source=app_source,
+            app_source_id=app_source_id,
             # From request params
             after=after_date,
             before=before_date,

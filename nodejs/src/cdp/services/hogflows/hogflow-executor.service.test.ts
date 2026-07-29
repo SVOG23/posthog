@@ -1479,7 +1479,11 @@ describe('Hogflow Executor', () => {
                 expect(conversionEvents).toHaveLength(1)
                 expect(conversionEvents[0]).toMatchObject({
                     distinct_id: 'distinct_id',
-                    properties: { $workflow_id: hogFlow.id, $workflow_conversion_type: 'property' },
+                    properties: {
+                        $workflow_id: hogFlow.id,
+                        $workflow_version: hogFlow.version,
+                        $workflow_conversion_type: 'property',
+                    },
                 })
             })
 

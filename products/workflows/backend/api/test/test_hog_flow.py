@@ -4111,3 +4111,47 @@ class TestHogFlowSecretInputs(APIBaseTest):
         rev_inputs = next(a for a in revision["content"]["actions"] if a["type"] == "function")["config"]["inputs"]
         assert "api_key" not in rev_inputs
         assert "LEGACY-SECRET" not in json.dumps(revision)
+
+
+class TestHogFlowVersionedMetrics(ClickhouseTestMixin, APIBaseTest):
+    def setUp(self):
+        super().setUp()
+        self.flow = HogFlow.objects.create(team=self.team, name="Versioned flow", version=3)
+
+    def _seed(self, app_source_id: str, *, count: int, app_source: str = "hog_flow_version"):
+        create_app_metric2(
+            team_id=self.team.pk,
+            app_source=app_source,
+            app_source_id=app_source_id,
+            instance_id="",
+            metric_kind="success",
+            metric_name="succeeded",
+            count=count,
+        )
+
+    @parameterized.expand([("totals", "metrics/totals"), ("trends", "metrics")])
+    def test_version_filter_reads_only_that_versions_rows(self, _name, path):
+        self._seed(f"{self.flow.id}/2", count=7)
+        self._seed(f"{self.flow.id}/3", count=4)
+        # The version-agnostic series the producer writes alongside the mirrored rows. Reading it for a
+        # `?version=` request would return the sum across versions, which looks plausible and is wrong.
+        self._seed(str(self.flow.id), count=11, app_source="hog_flow")
+
+        res = self.client.get(f"/api/projects/{self.team.id}/hog_flows/{self.flow.id}/{path}", {"version": 2})
+        assert res.status_code == status.HTTP_200_OK, res.json()
+        body = res.json()
+        counted = body["totals"]["success"] if "totals" in body else sum(body["series"][0]["values"])
+        assert counted == 7
+
+    def test_without_version_counts_every_version(self):
+        self._seed(f"{self.flow.id}/2", count=7)
+        self._seed(str(self.flow.id), count=11, app_source="hog_flow")
+
+        res = self.client.get(f"/api/projects/{self.team.id}/hog_flows/{self.flow.id}/metrics/totals")
+        assert res.json()["totals"] == {"success": 11}
+
+    def test_rejects_non_integer_version(self):
+        res = self.client.get(
+            f"/api/projects/{self.team.id}/hog_flows/{self.flow.id}/metrics/totals", {"version": "latest"}
+        )
+        assert res.status_code == status.HTTP_400_BAD_REQUEST

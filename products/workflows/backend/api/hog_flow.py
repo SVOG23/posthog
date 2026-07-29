@@ -2071,6 +2071,7 @@ class HogFlowViewSet(
     filterset_class = HogFlowFilterSet
     log_source = "hog_flow"
     app_source = "hog_flow"
+    versioned_app_source = "hog_flow_version"
     function_kind = "hog_flow"
 
     def dangerously_get_required_scopes(self, request, view) -> Optional[list[str]]:

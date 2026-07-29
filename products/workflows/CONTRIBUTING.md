@@ -301,6 +301,34 @@ Existing example:
 - `posthog_assignee` type defined in nodejs/src/cdp/templates/\_destinations/posthog_conversations/posthog-update-ticket.template.ts
 - Renderer in products/conversations/frontend/components/Assignee/CyclotronJobInputAssignee.tsx
 
+## Metrics and version attribution
+
+Workflow metrics live in the ClickHouse `app_metrics2` table, written by the CDP workers.
+Every hog flow metric is written **twice**:
+
+- `app_source: 'hog_flow'`, `app_source_id: '<flow id>'` — all versions combined. What the UI reads by default.
+- `app_source: 'hog_flow_version'`, `app_source_id: '<flow id>/<version>'` — only the version whose config produced the metric.
+
+`instance_id`, `metric_kind` and `metric_name` mean the same thing in both series, so a version-scoped read is the version-agnostic query with `app_source` and `app_source_id` swapped.
+`app_metrics2` can't hold the version in a column of its own — it's an AggregatingMergeTree whose sort key is its aggregation key, so a new dimension would have to join the ORDER BY and re-key existing parts.
+
+Read one version through the existing endpoints with `?version=`:
+
+```text
+GET /api/projects/:team_id/hog_flows/:id/metrics?version=3
+GET /api/projects/:team_id/hog_flows/:id/metrics/totals?version=3
+```
+
+Conversions carry the version as a `$workflow_version` property on the `$workflows_conversion` event, so version comparisons work in insights and cohorts too.
+
+Two things to know when reading these numbers:
+
+- **The version is the one that ran the step, not the one the person entered on.** Live edits reach runs already in flight, so a run that starts on v2 and sends its email after v3 is published attributes the trigger to v2 and the email to v3. Per-version rates are therefore a comparison of what each config did while it was live, not a fixed entry cohort.
+- **Email engagement metrics aren't version-attributed.** `email_delivered`, `email_opened`, `email_link_clicked` and the bounce metrics arrive from an SES webhook long after the send, and nothing records which version sent the message — they only land in the `hog_flow` series. Carrying the sending version on the tracking token would close this.
+
+When adding a metric for a hog flow, set `app_source_version` on the `MinimalAppMetric` if you're calling `queueAppMetric` directly.
+Metrics pushed onto a `result.metrics` array need nothing: `HogFunctionMonitoringService.queueInvocationResults` stamps the version for the whole result.
+
 ## Common pitfalls
 
 - **Forgot the side-effect import**: triggers/actions must be imported by their `index.ts`, and async functions must be imported by nodejs/src/cdp/async-functions/index.ts.

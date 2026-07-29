@@ -375,6 +375,7 @@ export class HogFlowExecutorService {
                     timestamp: new Date().toISOString(),
                     properties: {
                         $workflow_id: hogFlow.id,
+                        $workflow_version: hogFlow.version,
                         $workflow_conversion_type: 'property',
                     },
                 }
