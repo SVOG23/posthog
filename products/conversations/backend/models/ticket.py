@@ -1,6 +1,5 @@
 from typing import TYPE_CHECKING
 
-from django.contrib.postgres.fields import ArrayField
 from django.db import models, transaction
 
 from posthog.models.utils import UUIDTModel
@@ -66,16 +65,6 @@ class Ticket(UUIDTModel):
     message_count = models.IntegerField(default=0)
     last_message_at = models.DateTimeField(null=True, blank=True)
     last_message_text = models.CharField(max_length=500, null=True, blank=True)  # Truncated preview
-
-    # Denormalized tags and assignee, mirrored from the TaggedItem and TicketAssignment side
-    # tables via signals. Both are normalized away from the ticket row, so the flat HogQL
-    # `support_tickets` table (and anything else querying the ticket in SQL) can't see them
-    # without a join. Denormalizing here lets saved views defined by tag/assignee be expressed
-    # in SQL — e.g. scheduled SLA reports. Nullable so raw non-Django inserts don't need them.
-    tag_names = ArrayField(models.CharField(max_length=255), default=list, blank=True, null=True)
-    assignee_user_id = models.BigIntegerField(null=True, blank=True)
-    assignee_role_id = models.UUIDField(null=True, blank=True)
-    assignee_role_name = models.CharField(max_length=200, null=True, blank=True)
 
     # Slack channel fields (only set for channel_source="slack")
     slack_channel_id = models.CharField(max_length=64, null=True, blank=True)  # Slack channel ID

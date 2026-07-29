@@ -358,9 +358,6 @@ class TestZendeskImportBatchActivity(BaseTest):
         self.assertEqual(set(by_zid[501].tagged_items.values_list("tag__name", flat=True)), {"billing", "urgent"})
         self.assertEqual(set(by_zid[502].tagged_items.values_list("tag__name", flat=True)), {"billing"})
         self.assertEqual(by_zid[503].tagged_items.count(), 0)
-        self.assertEqual(by_zid[501].tag_names, ["billing", "urgent"])
-        self.assertEqual(by_zid[502].tag_names, ["billing"])
-        self.assertEqual(by_zid[503].tag_names, [])
         # One Tag row per name per team — the pre-existing "billing" is reused across tickets.
         self.assertEqual(Tag.objects.filter(team=self.team).count(), 2)
 

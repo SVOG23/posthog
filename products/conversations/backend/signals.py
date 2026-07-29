@@ -1,11 +1,10 @@
-import uuid
 from email.utils import make_msgid
 from typing import Any, cast
 
 from django.db import transaction
 from django.db.models import F, Q
 from django.db.models.functions import Greatest
-from django.db.models.signals import post_delete, post_save, pre_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
 import structlog
@@ -15,13 +14,10 @@ from posthog.exceptions_capture import capture_exception
 from posthog.models import User
 from posthog.models.comment import Comment
 from posthog.models.instance_setting import get_instance_setting
-from posthog.models.tagged_item import TaggedItem
-
-from ee.models.rbac.role import Role
 
 from .cache import invalidate_messages_cache, invalidate_tickets_cache
 from .events import capture_message_received, capture_message_sent, capture_ticket_created
-from .models import EmailOutboxMessage, Ticket, TicketAssignment
+from .models import EmailOutboxMessage, Ticket
 from .models.constants import Channel
 from .tasks import (
     post_reply_to_github,
@@ -584,68 +580,3 @@ def post_github_reply_on_team_message(sender, instance: Comment, created: bool, 
             logger.exception("github_reply_signal_failed", item_id=item_id)
 
     transaction.on_commit(do_post_to_github)
-
-
-# ---------------------------------------------------------------------------
-# Denormalized tags / assignee
-#
-# Tags (TaggedItem) and assignee (TicketAssignment) live in side tables, so they
-# don't appear on the flat SQL view of a ticket. These receivers mirror them onto
-# denormalized columns on the ticket row whenever the source rows change, keeping
-# the two in sync the same way the message-stats block above does for comments.
-#
-# Kept synchronous (not deferred to on_commit): the recompute reads the source
-# rows, which are already visible in the current transaction, and the write rolls
-# back with it if the transaction aborts — so the denormalized copy stays consistent.
-# ---------------------------------------------------------------------------
-
-
-def _recompute_ticket_tags(ticket_id: uuid.UUID) -> None:
-    tag_names = sorted(TaggedItem.objects.filter(ticket_id=ticket_id).values_list("tag__name", flat=True))
-    Ticket.objects.filter(id=ticket_id).update(tag_names=tag_names)
-
-
-def _apply_ticket_assignee(ticket_id: uuid.UUID, user_id: int | None, role_id: uuid.UUID | None) -> None:
-    role_name = Role.objects.filter(id=role_id).values_list("name", flat=True).first() if role_id else None
-    Ticket.objects.filter(id=ticket_id).update(
-        assignee_user_id=user_id,
-        assignee_role_id=role_id,
-        assignee_role_name=role_name,
-    )
-
-
-@receiver(post_save, sender=TaggedItem)
-@receiver(post_delete, sender=TaggedItem)
-def denormalize_ticket_tags(sender, instance: TaggedItem, **kwargs):
-    # TaggedItem is shared across many models; only ticket rows carry a ticket_id.
-    if instance.ticket_id:
-        _recompute_ticket_tags(instance.ticket_id)
-
-
-@receiver(post_save, sender=TicketAssignment)
-def denormalize_ticket_assignee_on_save(sender, instance: TicketAssignment, **kwargs):
-    _apply_ticket_assignee(instance.ticket_id, instance.user_id, instance.role_id)
-
-
-@receiver(post_delete, sender=TicketAssignment)
-def denormalize_ticket_assignee_on_delete(sender, instance: TicketAssignment, **kwargs):
-    _apply_ticket_assignee(instance.ticket_id, None, None)
-
-
-@receiver(pre_save, sender=Role)
-def capture_role_name_before_save(sender, instance: Role, update_fields=None, **kwargs):
-    if not instance.pk or (update_fields is not None and "name" not in update_fields):
-        return
-    instance._name_before_save = (  # type: ignore[attr-defined]
-        Role.objects.filter(pk=instance.pk).values_list("name", flat=True).first()
-    )
-
-
-@receiver(post_save, sender=Role)
-def denormalize_ticket_assignee_role_name(sender, instance: Role, created: bool, **kwargs):
-    if created:
-        return
-    name_before_save = getattr(instance, "_name_before_save", None)
-    if name_before_save is None or name_before_save == instance.name:
-        return
-    Ticket.objects.filter(assignee_role_id=instance.pk).update(assignee_role_name=instance.name)

@@ -35,7 +35,7 @@ from products.business_knowledge.backend.models.constants import SourceStatus, S
 from products.cdp.backend.models.hog_functions.hog_function import HogFunction
 from products.cohorts.backend.models.calculation_history import CohortCalculationHistory
 from products.cohorts.backend.models.cohort import Cohort
-from products.conversations.backend.models import Ticket, TicketAssignment
+from products.conversations.backend.models import Ticket
 from products.dashboards.backend.models.dashboard import Dashboard
 from products.dashboards.backend.models.dashboard_tile import DashboardTile
 from products.data_modeling.backend.facade.models import DataModelingJob, DataWarehouseSavedQuery
@@ -56,8 +56,6 @@ from products.warehouse_sources.backend.facade.models import (
     ExternalDataSource,
 )
 from products.workflows.backend.models.hog_flow.hog_flow import HogFlow
-
-from ee.models.rbac.role import Role
 
 if TYPE_CHECKING:
     from products.customer_analytics.backend.models.account import Account
@@ -900,26 +898,14 @@ class TestSystemTablesNotebookMarkdown(NonAtomicBaseTest):
 
 class TestSystemSupportTicketsNewColumns(NonAtomicBaseTest):
     """Read every column this table newly exposes back out through the federated read, so a
-    column whose Postgres type doesn't survive the ClickHouse `postgresql()` mapping (an array
-    read as a scalar, a tri-state boolean flattened to false) fails here and not in a
-    customer's query."""
+    column whose Postgres type doesn't survive the ClickHouse `postgresql()` mapping (a
+    tri-state boolean flattened to false, say) fails here and not in a customer's query."""
 
     CLASS_DATA_LEVEL_SETUP = False
 
-    COLUMNS = [
-        "tag_names",
-        "assignee_user_id",
-        "assignee_role_id",
-        "assignee_role_name",
-        "identity_verified",
-        "snoozed_until",
-        "organization_id",
-        "organization_id_source",
-        "ai_triage",
-    ]
+    COLUMNS = ["identity_verified", "snoozed_until", "organization_id", "organization_id_source", "ai_triage"]
 
     def test_new_columns_read_back(self):
-        role = Role.objects.create(name="Team Support", organization=self.organization)
         populated = Ticket.objects.create_with_number(
             team=self.team,
             channel_source="widget",
@@ -932,11 +918,6 @@ class TestSystemSupportTicketsNewColumns(NonAtomicBaseTest):
             organization_id_source="person",
             ai_triage={"routing": "billing"},
         )
-        for name in ("billing", "urgent"):
-            tag, _ = Tag.objects.get_or_create(name=name, team_id=self.team.id)
-            populated.tagged_items.create(tag=tag)
-        TicketAssignment.objects.create(ticket=populated, role=role)
-
         empty = Ticket.objects.create_with_number(
             team=self.team,
             channel_source="widget",
@@ -953,10 +934,6 @@ class TestSystemSupportTicketsNewColumns(NonAtomicBaseTest):
         rows = {str(row[0]): dict(zip(self.COLUMNS, row[1:])) for row in response.results}
 
         populated_row = rows[str(populated.id)]
-        assert populated_row["tag_names"] == ["billing", "urgent"]
-        assert populated_row["assignee_user_id"] is None
-        assert populated_row["assignee_role_id"] == role.id
-        assert populated_row["assignee_role_name"] == "Team Support"
         assert populated_row["identity_verified"] == 1
         assert populated_row["snoozed_until"] is not None
         assert populated_row["organization_id"] == "org_1"
@@ -964,11 +941,10 @@ class TestSystemSupportTicketsNewColumns(NonAtomicBaseTest):
         assert json.loads(populated_row["ai_triage"]) == {"routing": "billing"}
 
         empty_row = rows[str(empty.id)]
-        assert empty_row["tag_names"] == []
         assert empty_row["identity_verified"] is None
+        assert empty_row["snoozed_until"] is None
+        assert empty_row["organization_id"] is None
         assert json.loads(empty_row["ai_triage"]) == {}
-        for column in ("assignee_user_id", "assignee_role_id", "assignee_role_name", "snoozed_until"):
-            assert empty_row[column] is None
 
 
 class TestSystemAccountsLazyJoins(NonAtomicBaseTest):

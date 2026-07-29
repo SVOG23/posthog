@@ -340,9 +340,7 @@ def _import_ticket_batch_sync(input: ImportBatchInput) -> ImportBatchOutput:
             # Zendesk tags are plain strings on the ticket payload; PostHog tags are per-team
             # Tag rows, so normalize the same way the live tagging API does (tagify).
             zendesk_tags = {tagify(_strip_nul(str(t)))[:255] for t in (zendesk_ticket.get("tags") or [])}
-            tag_names = sorted(t for t in zendesk_tags if t)
-            ticket_tags_map.append((create_idx, tag_names))
-            ticket.tag_names = tag_names
+            ticket_tags_map.append((create_idx, sorted(t for t in zendesk_tags if t)))
 
             comments_to_create: list[Comment] = []
             customer_message_count = 0
