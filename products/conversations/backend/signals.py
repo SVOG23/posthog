@@ -632,8 +632,20 @@ def denormalize_ticket_assignee_on_delete(sender, instance: TicketAssignment, **
     _apply_ticket_assignee(instance.ticket_id, None, None)
 
 
+@receiver(pre_save, sender=Role)
+def capture_role_name_before_save(sender, instance: Role, update_fields=None, **kwargs):
+    if not instance.pk or (update_fields is not None and "name" not in update_fields):
+        return
+    instance._name_before_save = (  # type: ignore[attr-defined]
+        Role.objects.filter(pk=instance.pk).values_list("name", flat=True).first()
+    )
+
+
 @receiver(post_save, sender=Role)
 def denormalize_ticket_assignee_role_name(sender, instance: Role, created: bool, **kwargs):
-    # A role rename must reach the denormalized copy on every ticket assigned to it.
-    if not created:
-        Ticket.objects.filter(assignee_role_id=instance.id).update(assignee_role_name=instance.name)
+    if created:
+        return
+    name_before_save = getattr(instance, "_name_before_save", None)
+    if name_before_save is None or name_before_save == instance.name:
+        return
+    Ticket.objects.filter(assignee_role_id=instance.pk).update(assignee_role_name=instance.name)
