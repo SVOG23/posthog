@@ -23,7 +23,7 @@ from ..logic.health import CheckStatusRow, roll_up_health
 from ..logic.registry import UnknownCheckTypeError, all_specs, get_spec
 from ..logic.serialization import compute_fingerprint, from_config_entry, to_config_entry
 from ..logic.spec import CheckConfig, CheckTypeSpec
-from ..logic.subject_access import denied_subject_names, is_subject_denied
+from ..logic.subject_access import denied_subject_names, is_subject_denied, referenced_subject_names
 from ..logic.subjects import resolve_subject
 from .models import DataQualityCheck, DataQualityCheckRun, DataQualitySuiteRun
 
@@ -50,6 +50,7 @@ __all__ = [
     "from_config_entry",
     "get_spec",
     "is_subject_denied",
+    "referenced_subject_names",
     "related_subject_ref",
     "resolve_subject",
     "roll_up_health",
