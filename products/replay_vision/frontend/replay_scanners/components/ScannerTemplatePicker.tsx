@@ -18,6 +18,7 @@ import { urls } from 'scenes/urls'
 
 import { ScannerTypeBadge } from '../../components/ScannerTypeBadge'
 import type { ReplayScannerTemplateApi } from '../../generated/api.schemas'
+import { getReplayVisionEditDisabledReason } from '../../utils/accessControl'
 import { replayScannerLogic } from '../replayScannerLogic'
 import {
     ScannerTemplate,
@@ -100,6 +101,8 @@ function CustomTemplateCard({
     onDelete: () => void
 }): JSX.Element {
     const { searchParams } = useValues(router)
+    // Templates have no per-object access level, so gate delete on the resource-level bar the backend enforces.
+    const deleteDisabledReason = getReplayVisionEditDisabledReason()
 
     const handleClick = (): void => {
         const templateKey = customScannerTemplateKey(template.id)
@@ -145,7 +148,7 @@ function CustomTemplateCard({
                 status="danger"
                 icon={<IconTrash />}
                 loading={deleting}
-                disabledReason={deleting ? 'Deleting' : undefined}
+                disabledReason={deleting ? 'Deleting' : (deleteDisabledReason ?? undefined)}
                 tooltip="Delete template"
                 data-attr={`vision-template-custom-delete-${template.id}`}
                 onClick={() =>

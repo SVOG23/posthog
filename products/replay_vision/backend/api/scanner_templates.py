@@ -1,6 +1,6 @@
 from typing import Any
 
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 from django.shortcuts import get_object_or_404
 
 from drf_spectacular.utils import extend_schema_field
@@ -16,6 +16,7 @@ from posthog.event_usage import report_user_action
 
 from products.replay_vision.backend.feature_flag import ReplayVisionEnabledPermission
 from products.replay_vision.backend.models.replay_scanner import (
+    ReplayScanner,
     SamplingMode,
     ScannerModel,
     ScannerProvider,
@@ -156,7 +157,18 @@ class ReplayScannerTemplateViewSet(
             raise PermissionDenied("Deleting scanner templates requires scanner edit access.")
 
     def safely_get_queryset(self, queryset: QuerySet[ReplayScannerTemplate]) -> QuerySet[ReplayScannerTemplate]:
-        return queryset.filter(team_id=self.team_id).select_related("created_by").order_by("name", "id")
+        # A template exposes its source scanner's prompt and recording filters, so gate it by that
+        # scanner's object-level access. Orphaned templates (source scanner deleted) have no scanner
+        # left to check against and stay team-visible.
+        accessible_scanner_ids = self.user_access_control.filter_queryset_by_access_level(
+            ReplayScanner.objects.filter(team_id=self.team_id)
+        ).values_list("id", flat=True)
+        return (
+            queryset.filter(team_id=self.team_id)
+            .filter(Q(source_scanner_id__in=accessible_scanner_ids) | Q(source_scanner_id__isnull=True))
+            .select_related("created_by")
+            .order_by("name", "id")
+        )
 
     def dangerously_get_object(self) -> ReplayScannerTemplate:
         return get_object_or_404(self.get_queryset(), id=self.kwargs["pk"])

@@ -98,8 +98,19 @@ export const scannerTemplatesLogic = kea<scannerTemplatesLogicType>([
                 return
             }
             try {
-                const response = await visionScannerTemplatesList(String(teamId), { limit: 100 })
-                actions.loadTemplatesSuccess(response.results)
+                const limit = 100
+                const templates: ReplayScannerTemplateApi[] = []
+                let offset = 0
+                // Page through so teams with more than one page of templates don't silently lose the rest.
+                for (;;) {
+                    const response = await visionScannerTemplatesList(String(teamId), { limit, offset })
+                    templates.push(...response.results)
+                    if (response.results.length < limit) {
+                        break
+                    }
+                    offset += limit
+                }
+                actions.loadTemplatesSuccess(templates)
             } catch (error: any) {
                 lemonToast.error(`Failed to load scanner templates${error.detail ? `: ${error.detail}` : ''}`)
                 actions.loadTemplatesFailure()

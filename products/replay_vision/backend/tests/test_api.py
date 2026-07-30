@@ -955,6 +955,40 @@ class TestReplayScannerTemplateViewSet(_VisionAPITestCase):
         self.assertEqual(response.status_code, 204)
         self.assertFalse(ReplayScannerTemplate.objects.for_team(self.team.id).filter(id=own_template.id).exists())
 
+    def test_list_hides_templates_for_scanners_the_user_cannot_access(self) -> None:
+        visible = self._create_scanner(name="visible")
+        hidden = self._create_scanner(name="hidden")
+        self.assertEqual(self.client.post(f"{self.scanners_url}{visible.id}/save_as_template/").status_code, 201)
+        self.assertEqual(self.client.post(f"{self.scanners_url}{hidden.id}/save_as_template/").status_code, 201)
+        ReplayScannerTemplate.objects.for_team(self.team.id).create(
+            team=self.team,
+            source_scanner=None,
+            name="orphan",
+            scanner_type=ScannerType.MONITOR,
+            scanner_config={"prompt": "p"},
+            model=ScannerModel.GEMINI_3_6_FLASH,
+        )
+        with patch(
+            "posthog.rbac.user_access_control.UserAccessControl.filter_queryset_by_access_level",
+            side_effect=lambda qs, **_: qs.exclude(pk=hidden.pk),
+        ):
+            response = self.client.get(self.templates_url)
+        self.assertEqual(response.status_code, 200, response.json())
+        names = {template["name"] for template in response.json()["results"]}
+        self.assertEqual(names, {"visible", "orphan"})
+
+    def test_reusing_a_deleted_scanners_name_does_not_block_template_save(self) -> None:
+        first = self._create_scanner(name="Checkout")
+        self.assertEqual(self.client.post(f"{self.scanners_url}{first.id}/save_as_template/").status_code, 201)
+        # Deleting the scanner orphans its template (SET_NULL) but the template keeps the name.
+        first.delete()
+        second = self._create_scanner(name="Checkout")
+        self.assertEqual(self.client.post(f"{self.scanners_url}{second.id}/save_as_template/").status_code, 201)
+        self.assertEqual(
+            ReplayScannerTemplate.objects.for_team(self.team.id).filter(name="Checkout").count(),
+            2,
+        )
+
 
 class TestScannerSignalSourceEnablement(_VisionAPITestCase):
     def _payload(self, **overrides: Any) -> dict[str, Any]:

@@ -1143,7 +1143,14 @@ class ReplayScannerViewSet(TeamAndOrgViewSetMixin, AccessControlViewSetMixin, vi
                     setattr(template, field, value)
                 template.save(update_fields=[*template_values.keys(), "updated_at"])
         except IntegrityError:
-            raise serializers.ValidationError({"name": "A saved scanner template with this name already exists."})
+            # A concurrent save_as_template for the same scanner won the race to create the row; update it.
+            template = ReplayScannerTemplate.objects.filter(team_id=self.team_id, source_scanner=scanner).first()
+            if template is None:
+                raise
+            for field, value in template_values.items():
+                setattr(template, field, value)
+            template.save(update_fields=[*template_values.keys(), "updated_at"])
+            created = False
 
         report_user_action(
             cast(User, request.user),

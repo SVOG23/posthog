@@ -72,4 +72,25 @@ describe('scannerTemplatesLogic', () => {
                 deletingTemplateIds: [],
             })
     })
+
+    it('pages through every template instead of dropping ones past the first page', async () => {
+        await expectLogic(logic).toDispatchActions(['loadTemplatesSuccess'])
+
+        const page1 = Array.from({ length: 100 }, (_, i) => template(`p1-${i}`, `s-p1-${i}`))
+        const page2 = Array.from({ length: 50 }, (_, i) => template(`p2-${i}`, `s-p2-${i}`))
+        let call = 0
+        useMocks({
+            get: {
+                '/api/projects/:team/vision/scanner_templates/': () => {
+                    call += 1
+                    return call === 1
+                        ? [200, { count: 150, next: 'next', previous: null, results: page1 }]
+                        : [200, { count: 150, next: null, previous: null, results: page2 }]
+                },
+            },
+        })
+
+        await expectLogic(logic, () => logic.actions.loadTemplates()).toDispatchActions(['loadTemplatesSuccess'])
+        expect(logic.values.customTemplates).toHaveLength(150)
+    })
 })

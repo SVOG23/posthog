@@ -112,10 +112,6 @@ class Migration(migrations.Migration):
                         fields=("team", "source_scanner"),
                         name="replay_scanner_template_unique_source",
                     ),
-                    models.UniqueConstraint(
-                        fields=("team", "name"),
-                        name="replay_scanner_template_unique_name",
-                    ),
                 ],
             },
         ),
